@@ -4,17 +4,17 @@
 #include <windows.h>
 //#include <unistd.h> //needed for compiling with gcc, but does not work on VS 2019
 
-//Journeyman 1.1
+//Journeyman 1.0
 //Uses _BitScanForward64, __popcnt64
 //Modified version of the Video Instruction Chess Engine video #82
-//Instead of a 120 array board, uses bitboards very similar to Butter
+//Instead of a 120 array board, uses bitboards similar to Butter
 //Increased history table ~128 MB
 //Tapered evaluation
-//Evaluates a few more aspects of the position
+//Evaluates more aspects of the position than 1.1
 
 typedef unsigned long long U64;
 
-#define NAME "Journeyman 1.1"
+#define NAME "Journeyman 1.2"
 #define BRD_SQ_NUM 64
 
 #define MAXGAMEMOVES 2048//Max # of half moves expected in a game
@@ -317,6 +317,8 @@ U64 IsolatedPawnMasks[64];
 U64 PassedPawnMasks[2][64];
 U64 PawnAttackMasks[2][64];
 U64 PawnAdvanceMasks[2][64];
+U64 OutpostSquareMasks[2][64];
+U64 OutpostRanks[2];
 
 #define RANK8 0xFF00000000000000
 #define RANK7 0x00FF000000000000
@@ -370,6 +372,9 @@ void initalizeMasks() {
         PassedPawnMasks[1][i] = files;
         for (j = rank; j <= 7; j++)
             PassedPawnMasks[1][i] &= ~(RANKS[j]);
+
+        OutpostSquareMasks[0][i] = PassedPawnMasks[0][i] & ~FILES[file];
+        OutpostSquareMasks[1][i] = PassedPawnMasks[1][i] & ~FILES[file];
     }
 
     // INITALIZE ATTACK-SQ PAWN MASKS
@@ -424,6 +429,10 @@ void initalizeMasks() {
             PawnAdvanceMasks[1][i] = (1ULL << i) >> 8;
         }
     }
+
+    // Initalize relative outpost ranks
+    OutpostRanks[WHITE] = RANK4 | RANK5 | RANK6;
+    OutpostRanks[BLACK] = RANK3 | RANK4 | RANK5;
 }
 
 U64 KingAttacks[64];
@@ -2044,7 +2053,7 @@ const int PawnEG[64] =
     -1,   0,   4,   7,   7,   4,   0,  -1,
     1,   2,   7,  11,  11,   7,   2,   1,
     5,  11,  13,  14,  14,  13,  11,   5,
-    0,   1,   3,   5,   5,   3,   1,   0,    // Pawns 7 Rank
+    0,   1,   3,   5,   5,   3,   1,   0,
     0,   0,   0,   0,   0,   0,   0,   0
 };
 
@@ -2184,6 +2193,10 @@ const int mirror[64] = {
 #define PhaseNb 2
 #define RANK_NB 8
 
+// [PHASE][DEFENDED]
+const int KnightOutpostValues[PhaseNb][2] = { {20, 40}, {10, 20} };
+const int BishopOutpostValues[PhaseNb][2] = { {15, 30}, { 3,  5} };
+
 // Definition of evaluation terms related to Passed Pawns
 
 const int PassedPawn[2][2][RANK_NB][PhaseNb] = {
@@ -2193,31 +2206,37 @@ const int PassedPawn[2][2][RANK_NB][PhaseNb] = {
    {{   0,   0}, {  -5,   8}, { -12,  17}, { -21,  52}, { -14, 109}, {  28, 202}, { 119, 369}, {   0,   0}}},
 };
 
+int KnightMobility[PhaseNb][9] = {
+    {-30, -25, -10,   0,  10,  18,  26,  34,  42},
+    {-30, -25,   0,   9,  15,  21,  28,  35,  36}
+};
+
+int BishopMobility[PhaseNb][14] = {
+    {-30, -20, -15,   0, 15,  21,  26,  31,  34,  36,  37,  38,  38,  38},
+    {-30, -20, -15,   0, 15,  21,  26,  31,  34,  36,  37,  38,  38,  38},
+};
+
+int RookMobility[PhaseNb][15] = {
+    {-30, -25, -10,  -5,  -3,  -1,   6,  11,  15,  19,  23,  25,  26,  27, 27},
+    {-35, -20, -10,   0,  10,  19,  27,  33,  39,  41,  43,  45,  47,  48, 48}
+};
+
 const int BishopPair[PhaseNb] = { 46, 64 };
 
 const int Tempo[PhaseNb] = { 5, 7 };
 
-int PawnConnected[2][64] = {
-    { 0, 0, 0, 0, 0, 0, 0, 0,
-      2, 2, 2, 3, 3, 2, 2, 2,
-      4, 4, 5, 6, 6, 5, 4, 4,
-      7, 8,10,12,12,10, 8, 7,
-     11,14,17,21,21,17,14,11,
-     16,21,25,33,33,25,12,16,
-     32,42,50,55,55,50,42,32,
-      0, 0, 0, 0, 0, 0, 0, 0, },
-
-    { 0, 0, 0, 0, 0, 0, 0, 0,
-     32,42,50,55,55,50,42,32,
-     16,21,25,33,33,25,12,16,
-     11,14,17,21,21,17,14,11,
-      7, 8,10,12,12,10, 8, 7,
-      4, 4, 5, 6, 6, 5, 4, 4,
-      2, 2, 2, 3, 3, 2, 2, 2,
-      0, 0, 0, 0, 0, 0, 0, 0, }
+int SafetyTable[100] = { // Taken from CPW / Stockfish
+    0,  0,   1,   2,   3,   5,   7,   9,  12,  15,
+  18,  22,  26,  30,  35,  39,  44,  50,  56,  62,
+  68,  75,  82,  85,  89,  97, 105, 113, 122, 131,
+ 140, 150, 169, 180, 191, 202, 213, 225, 237, 248,
+ 260, 272, 283, 295, 307, 319, 330, 342, 354, 366,
+ 377, 389, 401, 412, 424, 436, 448, 459, 471, 483,
+ 494, 500, 500, 500, 500, 500, 500, 500, 500, 500,
+ 500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
+ 500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
+ 500, 500, 500, 500, 500, 500, 500, 500, 500, 500
 };
-
-#define ColourNb 2
 
 #define WHITE_SQUARES 0x55AA55AA55AA55AA
 #define BLACK_SQUARES 0xAA55AA55AA55AA55
@@ -2239,8 +2258,8 @@ int PawnConnected[2][64] = {
 
 #define FILE_NB 8
 
-U64 pawnAdvance(U64 pawns, U64 occupied, int colour) {
-    return ~occupied & (colour == WHITE ? (pawns << 8) : (pawns >> 8));
+U64 pawnAdvance(U64 pawns, U64 occupied, int color) {
+    return ~occupied & (color == WHITE ? (pawns << 8) : (pawns >> 8));
 }
 
 static inline int fileOf(int square) {
@@ -2273,14 +2292,11 @@ int Evalpos(S_BOARD* pos) {
 
     U64 myPieces, myPawns, enemyPawns, passedPawns = 0ULL;
     U64 tempPawns, tempKnights, tempBishops, tempRooks, tempQueens;
-    U64 occupiedMinusMyBishops, occupiedMinusMyRooks;
     U64 attacks, mobilityArea, destination, defenders;
 
     int mg = 0, eg = 0;
-    //int pawnmg = 0, pawneg = 0;
     int eval, curPhase;
-    int mobiltyCount, defended;
-    int colour, bit, semi, rank;
+    int color, bit, defended, mobilityCount, semi, rank;
     int count, canAdvance, safeAdvance;
 
     U64 whiteKingBitboard = (pos->PieceBB[K]);
@@ -2298,30 +2314,37 @@ int Evalpos(S_BOARD* pos) {
     U64 blackPawns = black & pawns;
     U64 notEmpty = white | black;
 
-    U64 pawnAttacks[ColourNb] = {
+    U64 pawnAttacks[2] = {
         (whitePawns << 9 & ~FILEA) | (whitePawns << 7 & ~FILEH),
         (blackPawns >> 9 & ~FILEH) | (blackPawns >> 7 & ~FILEA)
     };
 
-    U64 kingAreas[ColourNb] = {
+    U64 blockedPawns[2] = {
+        (whitePawns << 8 & black) >> 8,
+        (blackPawns >> 8 & white) << 8,
+    };
+
+    U64 kingAreas[2] = {
         KingMap[wKingSq] | (1ULL << wKingSq) | (KingMap[wKingSq] << 8),
         KingMap[bKingSq] | (1ULL << bKingSq) | (KingMap[bKingSq] >> 8)
     };
 
-    U64 allAttackBoards[ColourNb];
-    U64 attackedNoQueen[ColourNb];
+    U64 allAttackBoards[2];
 
     allAttackBoards[WHITE] = kingAttacks(wKingSq, ~0ULL);
     allAttackBoards[BLACK] = kingAttacks(bKingSq, ~0ULL);
 
-    for (colour = BLACK; colour >= WHITE; colour--) {
+    int attackCounts[2] = { 0, 0 };
+    int attackerCounts[2] = { 0, 0 };
+
+    for (color = BLACK; color >= WHITE; color--) {
 
         // Negate the scores so that the scores are from
         // White's perspective after the loop completes
         mg = -mg;
         eg = -eg;
 
-        myPieces = pos->ColorBB[colour];
+        myPieces = pos->ColorBB[color];
         myPawns = myPieces & pawns;
         enemyPawns = pawns ^ myPawns;
 
@@ -2331,30 +2354,43 @@ int Evalpos(S_BOARD* pos) {
         tempRooks = myPieces & rooks;
         tempQueens = myPieces & queens;
 
-        occupiedMinusMyBishops = notEmpty ^ (myPieces & (bishops | queens));
-        occupiedMinusMyRooks = notEmpty ^ (myPieces & (rooks | queens));
+        // Don't include squares that are attacked by enemy pawns, 
+        // occupied by our king, or occupied with our blocked pawns
+        // in our mobilityArea. This definition of mobilityArea is
+        // derived directly from Stockfish's evaluation features. 
+        mobilityArea = ~(
+            pawnAttacks[!color] | (myPieces & kings) | blockedPawns[color]
+            );
 
+        // Bishop gains a bonus for being in a pair
         if ((tempBishops & WHITE_SQUARES) && (tempBishops & BLACK_SQUARES)) {
             mg += BishopPair[MG];
             eg += BishopPair[EG];
         }
 
-        else if (pos->castlePerm & (3 << (2 * colour))) {
+        // King gains a bonus if it still may castle
+        else if (pos->castlePerm & (3 << (2 * color))) {
             mg += KING_CAN_CASTLE;
             eg += KING_CAN_CASTLE;
         }
 
         // Get the attack board for the pawns
-        attacks = pawnAttacks[colour] & kingAreas[!colour];
-        allAttackBoards[colour] |= pawnAttacks[colour];
+        attacks = pawnAttacks[color] & kingAreas[!color];
+        allAttackBoards[color] |= pawnAttacks[color];
 
-        const int forward = (colour == WHITE) ? 8 : -8;
+        // Update the counters for the safety evaluation
+        if (attacks) {
+            attackCounts[2] += 2 * bitCount(attacks);
+            attackerCounts[2] += 1;
+        }
+
+        const int forward = (color == WHITE) ? 8 : -8;
 
         while (tempPawns) {
 
             int bit = PopBit(&tempPawns);
 
-            if (colour == WHITE)
+            if (color == WHITE)
             {
                 mg += PawnMG[bit];
                 eg += PawnEG[bit];
@@ -2367,7 +2403,7 @@ int Evalpos(S_BOARD* pos) {
 
             // Save the fact that this pawn is passed. We will
             // use it later in order to apply a proper bonus
-            if (!(PassedPawnMasks[colour][bit] & enemyPawns))
+            if (!(PassedPawnMasks[color][bit] & enemyPawns))
                 passedPawns |= (1ULL << bit);
 
             if (!(IsolatedPawnMasks[bit] & tempPawns)) {
@@ -2386,7 +2422,7 @@ int Evalpos(S_BOARD* pos) {
 
             int bit = PopBit(&tempKnights);
 
-            if (colour == WHITE)
+            if (color == WHITE)
             {
                 mg += KnightMG[bit];
                 eg += KnightEG[bit];
@@ -2398,14 +2434,39 @@ int Evalpos(S_BOARD* pos) {
             }
 
             attacks = KnightAttacks[bit];
-            allAttackBoards[colour] |= attacks;
+            allAttackBoards[color] |= attacks;
+
+            // Knight is in an outpost square, unable to be
+            // attacked by enemy pawns, on or between ranks
+            // four through seven, relative to it's color
+            if (OutpostRanks[color] & (1ULL << bit)
+                && !(OutpostSquareMasks[color][bit] & enemyPawns)) {
+
+                defended = (pawnAttacks[color] & (1ULL << bit)) != 0ULL;
+
+                mg += KnightOutpostValues[MG][defended];
+                eg += KnightOutpostValues[EG][defended];
+            }
+
+            // Knight gains a mobility bonus based off of the number
+            // of attacked or defended squares within the mobility area
+            mobilityCount = bitCount((mobilityArea & attacks));
+            mg += KnightMobility[MG][mobilityCount];
+            eg += KnightMobility[EG][mobilityCount];
+
+            // Get the attack counts for this Knight
+            attacks = attacks & kingAreas[!color];
+            if (attacks) {
+                attackCounts[color] += 2 * bitCount(attacks);
+                attackerCounts[color]++;
+            }
         }
 
         while (tempBishops) {
 
             int bit = PopBit(&tempBishops);
 
-            if (colour == WHITE)
+            if (color == WHITE)
             {
                 mg += BishopMG[bit];
                 eg += BishopEG[bit];
@@ -2417,7 +2478,31 @@ int Evalpos(S_BOARD* pos) {
             }
 
             attacks = BishopAttacks(pos, bit);
-            allAttackBoards[colour] |= attacks;
+            allAttackBoards[color] |= attacks;
+
+            // Bishop is in an outpost square, unable to be
+            // attacked by enemy pawns, on or between ranks
+            // four through seven, relative to it's color
+            if (OutpostRanks[color] & (1ULL << bit)
+                && !(OutpostSquareMasks[color][bit] & enemyPawns)) {
+
+                defended = (pawnAttacks[color] & (1ULL << bit)) != 0ULL;
+
+                mg += BishopOutpostValues[MG][defended];
+                eg += BishopOutpostValues[EG][defended];
+            }
+
+            // Bishop gains a mobility bonus based off of the number
+            // of attacked or defended squares within the mobility area
+            mobilityCount = bitCount((mobilityArea & attacks));
+            mg += BishopMobility[MG][mobilityCount];
+            eg += BishopMobility[EG][mobilityCount];
+
+            attacks = attacks & kingAreas[!color];
+            if (attacks) {
+                attackCounts[color] += 2 * bitCount(attacks);
+                attackerCounts[color]++;
+            }
         }
 
 
@@ -2425,7 +2510,7 @@ int Evalpos(S_BOARD* pos) {
 
             int bit = PopBit(&tempRooks);
 
-            if (colour == WHITE)
+            if (color == WHITE)
             {
                 mg += RookMG[bit];
                 eg += RookEG[bit];
@@ -2437,10 +2522,10 @@ int Evalpos(S_BOARD* pos) {
             }
 
             attacks = RookAttacks(pos, bit);
-            allAttackBoards[colour] |= attacks;
+            allAttackBoards[color] |= attacks;
 
             // Rook is on a semi-open file if there are no
-            // pawns of the Rook's colour on the file. If
+            // pawns of the Rook's color on the file. If
             // there are no pawns at all, it is an open file
             if (!(myPawns & FILES[File(bit)])) {
 
@@ -2455,20 +2540,29 @@ int Evalpos(S_BOARD* pos) {
                 }
             }
 
-            // Rook gains a bonus for being located
-            // on seventh rank relative to its colour
-            if (Rank(bit) == (colour == BLACK ? 1 : 6)) {
+            if (Rank(bit) == (color == BLACK ? 1 : 6)) {
                 mg += ROOK_ON_7TH_MID;
                 eg += ROOK_ON_7TH_END;
             }
-        }
 
+            // Rook gains a mobility bonus based off of the number
+            // of attacked or defended squares within the mobility area
+            mobilityCount = bitCount((mobilityArea & attacks));
+            mg += RookMobility[MG][mobilityCount];
+            eg += RookMobility[EG][mobilityCount];
+
+            attacks = attacks & kingAreas[!color];
+            if (attacks) {
+                attackCounts[color] += 3 * bitCount(attacks);
+                attackerCounts[color]++;
+            }
+        }
 
         while (tempQueens) {
 
             int bit = PopBit(&tempQueens);
 
-            if (colour == WHITE)
+            if (color == WHITE)
             {
                 mg += QueenMG[bit];
                 eg += QueenEG[bit];
@@ -2480,37 +2574,65 @@ int Evalpos(S_BOARD* pos) {
             }
 
             attacks = (RookAttacks(pos, bit) | BishopAttacks(pos, bit));
-            allAttackBoards[colour] |= attacks;
+            allAttackBoards[color] |= attacks;
+
+            // Get the attack counts for this Queen
+            attacks = attacks & kingAreas[!color];
+            if (attacks) {
+                attackCounts[color] += 4 * bitCount(attacks);
+                attackerCounts[color]++;
+            }
         }
     }
 
-    // Evaluate the passed pawns for both colours
-    for (colour = BLACK; colour >= WHITE; colour--) {
+    // Evaluate the passed pawns for both colors
+    for (color = BLACK; color >= WHITE; color--) {
 
         // Negate the scores so that the scores are from
         // White's perspective after the loop completes
         mg = -mg; eg = -eg;
 
-        tempPawns = pos->ColorBB[colour] & passedPawns;
+        tempPawns = pos->ColorBB[color] & passedPawns;
 
         while (tempPawns) {
 
             // Pop off the next Passed Pawn
             bit = PopBit(&tempPawns);
 
-            // Determine the releative  rank
-            rank = (colour == BLACK) ? (7 - Rank(bit)) : Rank(bit);
+            // Determine the relative  rank
+            rank = (color == BLACK) ? (7 - Rank(bit)) : Rank(bit);
 
             // Determine where we would advance to
-            destination = (colour == BLACK)
+            destination = (color == BLACK)
                 ? ((1ULL << bit) >> 8)
                 : ((1ULL << bit) << 8);
 
             canAdvance = (destination & notEmpty) == 0ULL;
-            safeAdvance = !(destination & allAttackBoards[!colour]);
+            safeAdvance = !(destination & allAttackBoards[!color]);
 
             mg += PassedPawn[canAdvance][safeAdvance][rank][MG];;
             eg += PassedPawn[canAdvance][safeAdvance][rank][EG];
+        }
+    }
+
+    for (color = BLACK; color >= WHITE; color--) {
+
+        // Negate the scores so that the scores are from
+        // White's perspective after the loop completes
+        mg = -mg; eg = -eg;
+
+        if (attackerCounts[!color] >= 2) {
+
+            // Dont allow attack count to exceed 99
+            if (attackCounts[!color] >= 100)
+                attackCounts[!color] = 99;
+
+            // Reduce attack count if there are no enemy queens 
+            if (!(pos->ColorBB[!color] & queens))
+                attackCounts[!color] *= .25;
+
+            mg -= SafetyTable[attackCounts[!color]];
+            eg -= SafetyTable[attackCounts[!color]];
         }
     }
 
@@ -2960,9 +3082,8 @@ void SearchPosition(S_BOARD* pos, S_SEARCHINFO* info) {
 
     ClearForSearch(pos, info);
 
-    // iterative deepening
     for (currentDepth = 1; currentDepth <= info->depth; ++currentDepth) {
-        // alpha	 beta
+                             // alpha	 beta
         rootDepth = currentDepth;
         bestScore = AlphaBeta(-infinite, infinite, currentDepth, pos, info);
 
