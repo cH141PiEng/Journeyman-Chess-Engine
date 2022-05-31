@@ -4,16 +4,17 @@
 #include <windows.h>
 //#include <unistd.h> //needed for compiling with gcc, but does not work on VS 2019
 
-//Journeyman 1.0
+//Journeyman 1.1
 //Uses _BitScanForward64, __popcnt64
 //Modified version of the Video Instruction Chess Engine video #82
-//Instead of a 10x12 board, uses a 64 array for the board
+//Instead of a 120 array board, uses bitboards very similar to Butter
 //Increased history table ~128 MB
-//Elo in 2 min + 1 sec blitz around 1600
+//Tapered evaluation
+//Evaluates a few more aspects of the position
 
 typedef unsigned long long U64;
 
-#define NAME "Journeyman 1.0"
+#define NAME "Journeyman 1.1"
 #define BRD_SQ_NUM 64
 
 #define MAXGAMEMOVES 2048//Max # of half moves expected in a game
@@ -26,12 +27,11 @@ typedef unsigned long long U64;
 //Numbers for not a piece and the pieces:
 enum { e = 0, P, N, B, R, Q, K, p, n, b, r, q, k };
 
-enum { FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H, FILE_NONE };
-enum { RANK_1, RANK_2, RANK_3, RANK_4, RANK_5, RANK_6, RANK_7, RANK_8, RANK_NONE };
+enum { FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H };
+enum { RANK_1, RANK_2, RANK_3, RANK_4, RANK_5, RANK_6, RANK_7, RANK_8 };
 
 enum { WHITE, BLACK, BOTH };
 
-// The squares of the board
 enum {
     a1 = 0, b1, c1, d1, e1, f1, g1, h1,
     a2 = 8, b2, c2, d2, e2, f2, g2, h2,
@@ -108,9 +108,8 @@ typedef struct {
 typedef struct {
 
     int pieces[BRD_SQ_NUM];//Pieces corresponding to each squares
-    U64 pawns[3];//Pawn bitboards - white, black, both
-
-    int KingSq[2];//King square for white and black
+    U64 PieceBB[13];//bitboards corresponding to piece enumeration above
+    U64 ColorBB[3];//bitboards corresponding to color enumeration above
 
     int side;//Current side to move
     int enPas;//Check for EnPass move
@@ -126,18 +125,12 @@ typedef struct {
     //the history array if we have repetitions in the position
     //posKey idea introduced in video 11
 
-    int pceNum[13];//number of pieces for each piece type
-    int bigPce[2];//number of all pieces except pawns
-    int majPce[2];//number of rooks and queens for white and black
-    int minPce[2];//number of knights and bishops for white and black 
-    int material[2];//material value for white and black
-
     S_UNDO history[MAXGAMEMOVES];//Stores all of the previous game states with things which are stated in the undo 
     //structure and also it helps to check if a move is repeated or not. Can do so by using the 
     //hisPly as the index and going back to all the states and see if the posKey is repeated or not
 
     // piece list
-    int pList[13][10];
+    //int pList[13][10];
 
     S_PVTABLE PvTable[1];//Keep one PvTable in the main structure for the current board position...in the form of 
                          // a pointer which is already given memory.
@@ -210,12 +203,12 @@ typedef struct {
 #define CLRBIT(bb,sq) ((bb) &= ClearMask[(sq)])
 #define SETBIT(bb,sq) ((bb) |= SetMask[(sq)])
 
+#define bitCount(bb) ((int) (__popcnt64(bb)))
+
 #define IsBQ(p) (PieceBishopQueen[(p)])
 #define IsRQ(p) (PieceRookQueen[(p)])
 #define IsKn(p) (PieceKnight[(p)])
 #define IsKi(p) (PieceKing[(p)])
-
-#define MIRROR64(sq) (Mirror64[(sq)])
 
 #define COL(sq) ((sq)&7)
 #define ROW(pos) (((unsigned)pos)>>3)
@@ -236,24 +229,14 @@ char SideChar[];
 char RankChar[];
 char FileChar[];
 
-int PieceBig[13];
-int PieceMaj[13];
-int PieceMin[13];
 int PieceVal[13];
 int PieceCol[13];
-int PiecePawn[13];
 
 int FilesBrd[BRD_SQ_NUM];
 int RanksBrd[BRD_SQ_NUM];
 
-int Mirror64[64];
-
 U64 FileBBMask[8];
 U64 RankBBMask[8];
-
-U64 BlackPassedMask[64];
-U64 WhitePassedMask[64];
-U64 IsolatedMask[64];
 
 // data.c
 
@@ -262,9 +245,6 @@ char SideChar[] = "wb-";
 char RankChar[] = "12345678";
 char FileChar[] = "abcdefgh";
 
-int PieceBig[13] = { FALSE, FALSE, TRUE, TRUE, TRUE, TRUE, TRUE, FALSE, TRUE, TRUE, TRUE, TRUE, TRUE };
-int PieceMaj[13] = { FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, TRUE, FALSE, FALSE, FALSE, TRUE, TRUE, TRUE };
-int PieceMin[13] = { FALSE, FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, FALSE, FALSE, FALSE };
 int PieceVal[13] = { 0, 100, 325, 325, 550, 1000, 50000, 100, 325, 325, 550, 1000, 50000 };
 int PieceCol[13] = { BOTH, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
     BLACK, BLACK, BLACK, BLACK, BLACK, BLACK };
@@ -274,18 +254,6 @@ int PieceKnight[13] = { FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, T
 int PieceKing[13] = { FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE };
 int PieceRookQueen[13] = { FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, FALSE };
 int PieceBishopQueen[13] = { FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE };
-int PieceSlides[13] = { FALSE, FALSE, FALSE, TRUE, TRUE, TRUE, FALSE, FALSE, FALSE, TRUE, TRUE, TRUE, FALSE };
-
-int Mirror64[64] = {
-56	,	57	,	58	,	59	,	60	,	61	,	62	,	63	,
-48	,	49	,	50	,	51	,	52	,	53	,	54	,	55	,
-40	,	41	,	42	,	43	,	44	,	45	,	46	,	47	,
-32	,	33	,	34	,	35	,	36	,	37	,	38	,	39	,
-24	,	25	,	26	,	27	,	28	,	29	,	30	,	31	,
-16	,	17	,	18	,	19	,	20	,	21	,	22	,	23	,
-8	,	9	,	10	,	11	,	12	,	13	,	14	,	15	,
-0	,	1	,	2	,	3	,	4	,	5	,	6	,	7
-};
 
 //initialize
 
@@ -299,77 +267,6 @@ int Mirror64[64] = {
 					(U64)rand() << 45 | \
 					((U64)rand() & 0xf) << 60 )
 //This is a modified rand function which generates 64 bit random numbers for our hashkey values
-
-void InitEvalMasks() {
-
-    int sq, tsq, r, f;
-
-    for (sq = 0; sq < 8; ++sq) {
-        FileBBMask[sq] = 0ULL;
-        RankBBMask[sq] = 0ULL;
-    }
-
-    for (r = RANK_8; r >= RANK_1; r--) {
-        for (f = FILE_A; f <= FILE_H; f++) {
-            sq = r * 8 + f;
-            FileBBMask[f] |= (1ULL << sq);
-            RankBBMask[r] |= (1ULL << sq);
-        }
-    }
-
-    for (sq = 0; sq < 64; ++sq) {
-        IsolatedMask[sq] = 0ULL;
-        WhitePassedMask[sq] = 0ULL;
-        BlackPassedMask[sq] = 0ULL;
-    }
-
-    for (sq = 0; sq < 64; ++sq) {
-        tsq = sq + 8;
-
-        while (tsq < 64) {
-            WhitePassedMask[sq] |= (1ULL << tsq);
-            tsq += 8;
-        }
-
-        tsq = sq - 8;
-        while (tsq >= 0) {
-            BlackPassedMask[sq] |= (1ULL << tsq);
-            tsq -= 8;
-        }
-
-        if (FilesBrd[sq] > FILE_A) {
-            IsolatedMask[sq] |= FileBBMask[FilesBrd[sq] - 1];
-
-            tsq = sq + 7;
-            while (tsq < 64) {
-                WhitePassedMask[sq] |= (1ULL << tsq);
-                tsq += 8;
-            }
-
-            tsq = sq - 9;
-            while (tsq >= 0) {
-                BlackPassedMask[sq] |= (1ULL << tsq);
-                tsq -= 8;
-            }
-        }
-
-        if (FilesBrd[sq] < FILE_H) {
-            IsolatedMask[sq] |= FileBBMask[FilesBrd[sq] + 1];
-
-            tsq = sq + 9;
-            while (tsq < 64) {
-                WhitePassedMask[sq] |= (1ULL << tsq);
-                tsq += 8;
-            }
-
-            tsq = sq - 7;
-            while (tsq >= 0) {
-                BlackPassedMask[sq] |= (1ULL << tsq);
-                tsq -= 8;
-            }
-        }
-    }
-}
 
 void InitFilesRanksBrd() {
 
@@ -400,7 +297,6 @@ void InitHashKeys() {
     for (index = 0; index < 16; ++index) {
         CastleKeys[index] = RAND_64;
     }
-
 }
 
 void InitBitMasks() {
@@ -414,6 +310,271 @@ void InitBitMasks() {
     for (index = 0; index < 64; index++) {
         SetMask[index] |= (1ULL << index);
         ClearMask[index] = ~SetMask[index];
+    }
+}
+
+U64 IsolatedPawnMasks[64];
+U64 PassedPawnMasks[2][64];
+U64 PawnAttackMasks[2][64];
+U64 PawnAdvanceMasks[2][64];
+
+#define RANK8 0xFF00000000000000
+#define RANK7 0x00FF000000000000
+#define RANK6 0x0000FF0000000000
+#define RANK5 0x000000FF00000000
+#define RANK4 0x00000000FF000000
+#define RANK3 0x0000000000FF0000
+#define RANK2 0x000000000000FF00
+#define RANK1 0x00000000000000FF
+
+#define FILEA 0x0101010101010101
+#define FILEB 0x0202020202020202
+#define FILEC 0x0404040404040404
+#define FILED 0x0808080808080808
+#define FILEE 0x1010101010101010
+#define FILEF 0x2020202020202020
+#define FILEG 0x4040404040404040
+#define FILEH 0x8080808080808080
+
+U64 FILES[8] = { FILEA, FILEB, FILEC, FILED, FILEE, FILEF, FILEG, FILEH };
+U64 RANKS[8] = { RANK1, RANK2, RANK3, RANK4, RANK5, RANK6, RANK7, RANK8 };
+
+void initalizeMasks() {
+
+    int i, j, file, rank;
+    U64 files;
+
+    // INITALIZE ISOLATED PAWN MASKS
+    for (i = 0; i < 64; i++) {
+        file = i % 8;
+
+        if (file > 0 && file < 7)
+            IsolatedPawnMasks[i] = FILES[file + 1] | FILES[file - 1];
+        else if (file > 0)
+            IsolatedPawnMasks[i] = FILES[file - 1];
+        else
+            IsolatedPawnMasks[i] = FILES[file + 1];
+    }
+
+    // INITALIZE PASSED PAWN MASKS AND OUTPOST MASKS
+    for (i = 0; i < 64; i++) {
+        file = i % 8;
+        rank = i / 8;
+
+        files = IsolatedPawnMasks[i] | FILES[file];
+
+        PassedPawnMasks[0][i] = files;
+        for (j = rank; j >= 0; j--)
+            PassedPawnMasks[0][i] &= ~(RANKS[j]);
+
+        PassedPawnMasks[1][i] = files;
+        for (j = rank; j <= 7; j++)
+            PassedPawnMasks[1][i] &= ~(RANKS[j]);
+    }
+
+    // INITALIZE ATTACK-SQ PAWN MASKS
+    for (i = 0; i < 64; i++) {
+        file = i % 8;
+        rank = i / 8;
+
+        PawnAttackMasks[0][i] = 0ULL;
+        PawnAttackMasks[1][i] = 0ULL;
+
+        if (rank == 0) {
+            PawnAttackMasks[1][i] |= (1ULL << i) << 7;
+            PawnAttackMasks[1][i] |= (1ULL << i) << 9;
+        }
+
+        else if (rank == 7) {
+            PawnAttackMasks[0][i] |= (1ULL << i) >> 7;
+            PawnAttackMasks[0][i] |= (1ULL << i) >> 9;
+        }
+
+        else {
+            PawnAttackMasks[0][i] |= (1ULL << i) >> 7;
+            PawnAttackMasks[0][i] |= (1ULL << i) >> 9;
+            PawnAttackMasks[1][i] |= (1ULL << i) << 7;
+            PawnAttackMasks[1][i] |= (1ULL << i) << 9;
+        }
+
+        if (file == 0) {
+            PawnAttackMasks[0][i] &= ~FILEH;
+            PawnAttackMasks[1][i] &= ~FILEH;
+        }
+
+        else if (file == 7) {
+            PawnAttackMasks[0][i] &= ~FILEA;
+            PawnAttackMasks[1][i] &= ~FILEA;
+        }
+    }
+
+    // INITALIZE PAWN-MAY-ADVANCE MASKS
+    for (i = 0; i < 64; i++) {
+        rank = i / 8;
+
+        PawnAdvanceMasks[0][i] = 0ULL;
+        PawnAdvanceMasks[1][i] = 0ULL;
+
+        if (rank == 0)
+            PawnAdvanceMasks[0][i] = (1ULL << i) << 8;
+        else if (rank == 7)
+            PawnAdvanceMasks[1][i] = (1ULL << i) >> 8;
+        else {
+            PawnAdvanceMasks[0][i] = (1ULL << i) << 8;
+            PawnAdvanceMasks[1][i] = (1ULL << i) >> 8;
+        }
+    }
+}
+
+U64 KingAttacks[64];
+U64 KnightAttacks[64];
+
+int fileArray[64];
+int rankArray[64];
+
+U64 rookAttacksEmpty[64];
+U64 bishopAttacksEmpty[64];
+
+U64 bitRays[8][64];
+
+void initFileRankArrays() {
+    for (int square = 0; square < 64; square++) {
+        fileArray[square] = square % 8;
+        rankArray[square] = square / 8;
+    }
+}
+
+#define getSquare(file, rank) (((rank) * 8) + (file))
+#define onBoard(file, rank) (file >= FILE_A && file <= FILE_H && rank >= RANK_1 && rank <= RANK_8)
+
+void initKnightAttacks() {
+    for (int square = 0; square < 64; square++) {
+        int originalFile = fileArray[square];
+        int originalRank = rankArray[square];
+
+        int file, rank;
+        KnightAttacks[square] = 0ULL;
+
+        file = originalFile + 2; rank = originalRank + 1;
+        if (onBoard(file, rank)) SETBIT(KnightAttacks[square], getSquare(file, rank));
+        rank = originalRank - 1;
+        if (onBoard(file, rank)) SETBIT(KnightAttacks[square], getSquare(file, rank));
+        file = originalFile + 1; rank = originalRank + 2;
+        if (onBoard(file, rank)) SETBIT(KnightAttacks[square], getSquare(file, rank));
+        rank = originalRank - 2;
+        if (onBoard(file, rank)) SETBIT(KnightAttacks[square], getSquare(file, rank));
+        file = originalFile - 1; rank = originalRank + 2;
+        if (onBoard(file, rank)) SETBIT(KnightAttacks[square], getSquare(file, rank));
+        rank = originalRank - 2;
+        if (onBoard(file, rank)) SETBIT(KnightAttacks[square], getSquare(file, rank));
+        file = originalFile - 2; rank = originalRank + 1;
+        if (onBoard(file, rank)) SETBIT(KnightAttacks[square], getSquare(file, rank));
+        rank = originalRank - 1;
+        if (onBoard(file, rank)) SETBIT(KnightAttacks[square], getSquare(file, rank));
+    }
+}
+
+void initKingAttacks() {
+    for (int square = 0; square < 64; square++) {
+        int file = fileArray[square];
+        int rank = rankArray[square];
+
+        KingAttacks[square] = 0ULL;
+
+        if (onBoard(file + 1, rank + 1)) SETBIT(KingAttacks[square], getSquare(file + 1, rank + 1));
+        if (onBoard(file + 1, rank)) SETBIT(KingAttacks[square], getSquare(file + 1, rank));
+        if (onBoard(file + 1, rank - 1)) SETBIT(KingAttacks[square], getSquare(file + 1, rank - 1));
+        if (onBoard(file, rank + 1)) SETBIT(KingAttacks[square], getSquare(file, rank + 1));
+        if (onBoard(file, rank - 1)) SETBIT(KingAttacks[square], getSquare(file, rank - 1));
+        if (onBoard(file - 1, rank + 1)) SETBIT(KingAttacks[square], getSquare(file - 1, rank + 1));
+        if (onBoard(file - 1, rank)) SETBIT(KingAttacks[square], getSquare(file - 1, rank));
+        if (onBoard(file - 1, rank - 1)) SETBIT(KingAttacks[square], getSquare(file - 1, rank - 1));
+    }
+}
+
+void initRookAttacks() {
+    for (int square = 0; square < 64; square++) {
+        rookAttacksEmpty[square] = 0ULL;
+
+        int file = fileArray[square];
+        int rank = rankArray[square];
+
+        for (int f = file + 1; f <= FILE_H; f++) {
+            SETBIT(rookAttacksEmpty[square], getSquare(f, rank));
+        }
+        for (int f = file - 1; f >= FILE_A; f--) {
+            SETBIT(rookAttacksEmpty[square], getSquare(f, rank));
+        }
+        for (int r = rank + 1; r <= RANK_8; r++) {
+            SETBIT(rookAttacksEmpty[square], getSquare(file, r));
+        }
+        for (int r = rank - 1; r >= RANK_1; r--) {
+            SETBIT(rookAttacksEmpty[square], getSquare(file, r));
+        }
+    }
+}
+
+void initBishopAttacks() {
+    for (int square = 0; square < 64; square++) {
+        bishopAttacksEmpty[square] = 0ULL;
+
+        for (int tr = square + 9; (tr % 8 > 0) && (tr < 64); tr += 9) {
+            SETBIT(bishopAttacksEmpty[square], tr);
+        }
+        for (int tl = square + 7; (tl % 8 < 7) && (tl < 64); tl += 7) {
+            SETBIT(bishopAttacksEmpty[square], tl);
+        }
+        for (int br = square - 7; (br % 8 > 0) && (br >= 0); br -= 7) {
+            SETBIT(bishopAttacksEmpty[square], br);
+        }
+        for (int bl = square - 9; (bl % 8 < 7) && (bl >= 0); bl -= 9) {
+            SETBIT(bishopAttacksEmpty[square], bl);
+        }
+    }
+}
+
+enum { NORTH, NORTH_EAST, EAST, SOUTH_EAST, SOUTH, SOUTH_WEST, WEST, NORTH_WEST };
+
+void initBitRays() {
+    for (int i = 0; i < 64; i++) {
+        bitRays[NORTH][i] = 0ULL;
+        bitRays[NORTH_EAST][i] = 0ULL;
+        bitRays[EAST][i] = 0ULL;
+        bitRays[SOUTH_EAST][i] = 0ULL;
+        bitRays[SOUTH][i] = 0ULL;
+        bitRays[SOUTH_WEST][i] = 0ULL;
+        bitRays[WEST][i] = 0ULL;
+        bitRays[NORTH_WEST][i] = 0ULL;
+        for (int sq = i + 8; sq < 64; sq += 8) {
+            SETBIT(bitRays[NORTH][i], sq);
+        }
+        for (int sq = i + 9; sq < 64; sq += 9) {
+            if (fileArray[sq] == FILE_A) break;
+            SETBIT(bitRays[NORTH_EAST][i], sq);
+        }
+        for (int sq = i + 1; sq < 64; sq += 1) {
+            if (fileArray[sq] == FILE_A) break;
+            SETBIT(bitRays[EAST][i], sq);
+        }
+        for (int sq = i - 7; sq >= 0; sq -= 7) {
+            if (fileArray[sq] == FILE_A) break;
+            SETBIT(bitRays[SOUTH_EAST][i], sq);
+        }
+        for (int sq = i - 8; sq >= 0; sq -= 8) {
+            SETBIT(bitRays[SOUTH][i], sq);
+        }
+        for (int sq = i - 9; sq >= 0; sq -= 9) {
+            if (fileArray[sq] == FILE_H) break;
+            SETBIT(bitRays[SOUTH_WEST][i], sq);
+        }
+        for (int sq = i - 1; sq >= 0; sq -= 1) {
+            if (fileArray[sq] == FILE_H) break;
+            SETBIT(bitRays[WEST][i], sq);
+        }
+        for (int sq = i + 7; sq < 64; sq += 7) {
+            if (fileArray[sq] == FILE_H) break;
+            SETBIT(bitRays[NORTH_WEST][i], sq);
+        }
     }
 }
 
@@ -445,12 +606,181 @@ void InitMvvLva() {
     }
 }
 
+U64 KingMap[64];
+
+void generateKingMap() {
+
+    int i;
+    U64 z = 1;
+
+    for (i = 0; i < 64; i++) {
+        if (i + 9 < 64 && i % 8 != 7)
+            KingMap[i] |= z << (i + 9);
+        if (i - 9 >= 0 && i % 8 != 0)
+            KingMap[i] |= z << (i - 9);
+        if (i + 7 < 64 && i % 8 != 0)
+            KingMap[i] |= z << (i + 7);
+        if (i - 7 >= 0 && i % 8 != 7)
+            KingMap[i] |= z << (i - 7);
+        if (i + 1 < 64 && i % 8 != 7)
+            KingMap[i] |= z << (i + 1);
+        if (i - 1 >= 0 && i % 8 != 0)
+            KingMap[i] |= z << (i - 1);
+        if (i + 8 < 64)
+            KingMap[i] |= z << (i + 8);
+        if (i - 8 >= 0)
+            KingMap[i] |= z << (i - 8);
+    }
+}
+
 void AllInit() {
     InitBitMasks();
+
+    initalizeMasks();
+
+    initFileRankArrays();
+
     InitHashKeys();
+
     InitFilesRanksBrd();
-    InitEvalMasks();
+
+    initKnightAttacks();
+    initKingAttacks();
+    initRookAttacks();
+    initBishopAttacks();
+
+    initBitRays();
     InitMvvLva();
+
+    generateKingMap();
+}
+
+// bitboards
+
+int Lsb(const U64 bb) {
+    unsigned long index = -1;
+    _BitScanForward64(&index, bb);
+    return index;
+}
+
+// Returns the index of the least significant bit and unsets it
+int PopBit(U64* bb) {
+
+    int lsb = Lsb(*bb);
+    *bb &= (*bb - 1);
+
+    return lsb;
+}
+
+int Msb(const U64 bb) {
+    unsigned long index = -1;
+    _BitScanReverse64(&index, bb);
+    return index;
+}
+
+#define CountBits(bb) ((int) (__popcnt64(bb)))
+
+void PrintBitBoard(U64 bb) {
+
+    U64 shiftMe = 1ULL;
+
+    int rank = 0;
+    int file = 0;
+    int sq = 0;
+
+    printf("\n");
+    for (rank = RANK_8; rank >= RANK_1; --rank) {
+        for (file = FILE_A; file <= FILE_H; ++file) {
+            sq = FR2SQ(file, rank);
+
+            if ((shiftMe << sq) & bb)
+                printf("X");
+            else
+                printf("-");
+
+        }
+        printf("\n");
+    }
+    printf("\n\n");
+}
+
+int peekBit(U64 bb) {
+    unsigned long index = -1;
+    _BitScanForward64(&index, bb);
+    return index;
+}
+
+int peekBitReverse(U64 bb) {
+    unsigned long index = -1;
+    _BitScanReverse64(&index, bb);
+    return index;
+}
+
+U64 RookAttacks(const S_BOARD* pos, int sq) {
+    U64 occ = pos->ColorBB[2] | 0x8000000000000001;
+    int n = peekBit(occ & (bitRays[NORTH][sq] | SetMask[63]));
+    int e = peekBit(occ & (bitRays[EAST][sq] | SetMask[63]));
+    int s = peekBitReverse(occ & (bitRays[SOUTH][sq] | SetMask[0]));
+    int w = peekBitReverse(occ & (bitRays[WEST][sq] | SetMask[0]));
+    return rookAttacksEmpty[sq] ^ bitRays[NORTH][n] ^ bitRays[EAST][e] ^ bitRays[SOUTH][s] ^ bitRays[WEST][w];
+}
+
+U64 BishopAttacks(const S_BOARD* pos, int sq) {
+    U64 occ = pos->ColorBB[2] | 0x8000000000000001;
+    int nw = peekBit(occ & (bitRays[NORTH_WEST][sq] | SetMask[63]));
+    int ne = peekBit(occ & (bitRays[NORTH_EAST][sq] | SetMask[63]));
+    int sw = peekBitReverse(occ & (bitRays[SOUTH_WEST][sq] | SetMask[0]));
+    int se = peekBitReverse(occ & (bitRays[SOUTH_EAST][sq] | SetMask[0]));
+    return bishopAttacksEmpty[sq] ^ bitRays[NORTH_WEST][nw] ^ bitRays[NORTH_EAST][ne] ^ bitRays[SOUTH_WEST][sw] ^ bitRays[SOUTH_EAST][se];
+}
+
+const U64 FILE_A_MASK = 0x0101010101010101;
+const U64 FILE_H_MASK = 0x8080808080808080;
+const U64 NOT_FILE_A_MASK = 0xFEFEFEFEFEFEFEFE;
+const U64 NOT_FILE_H_MASK = 0x7F7F7F7F7F7F7F7F;
+const U64 RANK_1_MASK = 0x00000000000000FF;
+const U64 RANK_3_MASK = 0x0000000000FF0000;
+const U64 RANK_6_MASK = 0x0000FF0000000000;
+const U64 RANK_8_MASK = 0xFF00000000000000;
+const U64 NOT_RANK_8_MASK = 0x00FFFFFFFFFFFFFF;
+
+int AttackedByWhite(const S_BOARD* pos, int sq)
+{
+    if (KnightAttacks[sq] & pos->PieceBB[N]) return 1;
+    if (BishopAttacks(pos, sq) & (pos->PieceBB[B] | pos->PieceBB[Q])) return 1;
+    if (RookAttacks(pos, sq) & (pos->PieceBB[R] | pos->PieceBB[Q])) return 1;
+    if ((((pos->PieceBB[P] << 7) & NOT_FILE_H_MASK) | ((pos->PieceBB[P] << 9) & NOT_FILE_A_MASK)) & SetMask[sq]) return 1;
+    if (KingAttacks[sq] & pos->PieceBB[K]) return 1;
+    return 0;
+}
+
+int AttackedByBlack(const S_BOARD* pos, int sq) {
+    if (KnightAttacks[sq] & pos->PieceBB[n])
+    {
+        return 1;
+    }
+    if (BishopAttacks(pos, sq) & (pos->PieceBB[b] | pos->PieceBB[q]))
+    { 
+        return 1;
+    }
+    if (RookAttacks(pos, sq) & (pos->PieceBB[r] | pos->PieceBB[q]))
+    {
+        return 1;
+    }
+    if ((((pos->PieceBB[p] >> 9)& NOT_FILE_H_MASK) | ((pos->PieceBB[p] >> 7)& NOT_FILE_A_MASK))& SetMask[sq])
+    { 
+        return 1;
+    }
+    if (KingAttacks[sq] & pos->PieceBB[k])
+    { 
+        return 1;
+    }
+    return 0;
+}
+
+int UnderCheck(const S_BOARD* pos, int side) {
+    if (side == WHITE) return AttackedByBlack(pos, peekBit(pos->PieceBB[K]));
+    else return AttackedByWhite(pos, peekBit(pos->PieceBB[k]));
 }
 
 // makemove
@@ -476,38 +806,14 @@ static void ClearPiece(const int sq, S_BOARD* pos) {
     int pce = pos->pieces[sq];
 
     int col = PieceCol[pce];
-    int index = 0;
-    int t_pceNum = -1;
 
     HASH_PCE(pce, sq);
 
     pos->pieces[sq] = e;
-    pos->material[col] -= PieceVal[pce];
 
-    if (PieceBig[pce]) {
-        pos->bigPce[col]--;
-        if (PieceMaj[pce]) {
-            pos->majPce[col]--;
-        }
-        else {
-            pos->minPce[col]--;
-        }
-    }
-    else {
-        CLRBIT(pos->pawns[col], sq);
-        CLRBIT(pos->pawns[BOTH], sq);
-    }
-
-    for (index = 0; index < pos->pceNum[pce]; ++index) {
-        if (pos->pList[pce][index] == sq) {
-            t_pceNum = index;
-            break;
-        }
-    }
-
-    pos->pceNum[pce]--;
-
-    pos->pList[pce][t_pceNum] = pos->pList[pce][pos->pceNum[pce]];
+    CLRBIT(pos->PieceBB[pce], sq);
+    CLRBIT(pos->ColorBB[col], sq);
+    CLRBIT(pos->ColorBB[BOTH], sq);
 
 }
 
@@ -519,22 +825,9 @@ static void AddPiece(const int sq, S_BOARD* pos, const int pce) {
 
     pos->pieces[sq] = pce;
 
-    if (PieceBig[pce]) {
-        pos->bigPce[col]++;
-        if (PieceMaj[pce]) {
-            pos->majPce[col]++;
-        }
-        else {
-            pos->minPce[col]++;
-        }
-    }
-    else {
-        SETBIT(pos->pawns[col], sq);
-        SETBIT(pos->pawns[BOTH], sq);
-    }
-
-    pos->material[col] += PieceVal[pce];
-    pos->pList[pce][pos->pceNum[pce]++] = sq;
+    SETBIT(pos->PieceBB[pce], sq);
+    SETBIT(pos->ColorBB[col], sq);
+    SETBIT(pos->ColorBB[BOTH], sq);
 
 }
 
@@ -550,23 +843,18 @@ static void MovePiece(const int from, const int to, S_BOARD* pos) {
     HASH_PCE(pce, to);
     pos->pieces[to] = pce;
 
-    if (!PieceBig[pce]) {
-        CLRBIT(pos->pawns[col], from);
-        CLRBIT(pos->pawns[BOTH], from);
-        SETBIT(pos->pawns[col], to);
-        SETBIT(pos->pawns[BOTH], to);
-    }
+    CLRBIT(pos->PieceBB[pce], from);
+    CLRBIT(pos->ColorBB[col], from);
+    CLRBIT(pos->ColorBB[BOTH], from);
 
-    for (index = 0; index < pos->pceNum[pce]; ++index) {
-        if (pos->pList[pce][index] == from) {
-            pos->pList[pce][index] = to;
-            break;
-        }
-    }
+    SETBIT(pos->PieceBB[pce], to);
+    SETBIT(pos->ColorBB[col], to);
+    SETBIT(pos->ColorBB[BOTH], to);
 }
 
 void TakeMove(S_BOARD* pos);
-int SqAttacked(const int sq, const int side, const S_BOARD* pos);
+int SqAttacked(int sq, int side, S_BOARD* pos);
+void PrintBoard(const S_BOARD* pos);
 
 int MakeMove(S_BOARD* pos, int move) {
 
@@ -628,7 +916,7 @@ int MakeMove(S_BOARD* pos, int move) {
     pos->hisPly++;
     pos->ply++;
 
-    if (PiecePawn[pos->pieces[from]]) {
+    if (((pos->pieces[from]) == P) || ((pos->pieces[from]) == p)){
         pos->fiftyMove = 0;
         if (move & MFLAGPS) {
             if (side == WHITE) {
@@ -649,14 +937,13 @@ int MakeMove(S_BOARD* pos, int move) {
         AddPiece(to, pos, prPce);
     }
 
-    if (PieceKing[pos->pieces[to]]) {
-        pos->KingSq[pos->side] = to;
-    }
+    pos->ColorBB[BOTH] = pos->ColorBB[WHITE] | pos->ColorBB[BLACK];
+    pos->PieceBB[e] = ~pos->ColorBB[BOTH];
 
     pos->side ^= 1;
     HASH_SIDE;
 
-    if (SqAttacked(pos->KingSq[side], pos->side, pos)) {
+    if (UnderCheck(pos, pos->side^1)) {
         TakeMove(pos);
         return FALSE;
     }
@@ -706,10 +993,6 @@ void TakeMove(S_BOARD* pos) {
 
     MovePiece(to, from, pos);
 
-    if (PieceKing[pos->pieces[from]]) {
-        pos->KingSq[pos->side] = from;
-    }
-
     int captured = CAPTURED(move);
     if (captured != e) {
         AddPiece(to, pos, captured);
@@ -723,197 +1006,25 @@ void TakeMove(S_BOARD* pos) {
 
 // attack
 
-const int KnDir[8] = { -6, -17,	-15, -10, 6, 17, 15, 10 };
-const int RkDir[4] = { -1, -8,	1, 8 };
-const int BiDir[4] = { -7, -9, 7, 9 };
-const int KiDir[8] = { -1, -8,	1, 8, -7, -9, 7, 9 };
-
 // is square attacked by side? - needed in particular to check if king is in check or squares
 // in between king and rook to castle with are attacked by any piece of opposite color.
-int SqAttacked(const int sq, const int side, const S_BOARD* pos) {
+int SqAttacked(int sq, int side, S_BOARD* pos) {
 
-    int cs, rs, ct, rt, pce, index, t_sq, dir;
-
-    cs = COL(sq);
-    rs = ROW(sq);
-
-    // pawns
-    if (side == WHITE) {
-        t_sq = sq - 9;
-        ct = COL(t_sq);
-        if (pos->pieces[sq - 9] == P && (0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-            return TRUE;
-        }
-        t_sq = sq - 7;
-        ct = COL(t_sq);
-        if (pos->pieces[t_sq] == P && (0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-            return TRUE;
-        }
+    if(side == WHITE)
+    {
+        return AttackedByWhite(pos, sq);
     }
-    else {
-        t_sq = sq + 9;
-        ct = COL(t_sq);
-        if (pos->pieces[t_sq] == p && (0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-            return TRUE;
-        }
-        t_sq = sq + 7;
-        ct = COL(t_sq);
-        if (pos->pieces[t_sq] == p && (0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-            return TRUE;
-        }
+    else
+    {
+        return AttackedByBlack(pos, sq);
     }
-
-    // knights
-    for (index = 0; index < 8; ++index) {
-        t_sq = sq + KnDir[index];
-        pce = pos->pieces[t_sq];
-        ct = COL(t_sq);
-        rt = ROW(t_sq);
-        if (((0 <= t_sq) && (t_sq <= 63) && (-2 <= (cs - ct)) && ((cs - ct) <= 2) && (-2 <= (rs - rt)) && ((rs - rt) <= 2)) && IsKn(pce) && PieceCol[pce] == side) {
-            return TRUE;
-        }
-    }
-
-    // rooks, queens
-    for (index = 0; index < 4; ++index) {
-        dir = RkDir[index];
-        t_sq = sq + dir;
-        cs = COL(sq);
-        rs = ROW(sq);
-        ct = COL(t_sq);
-        rt = ROW(t_sq);
-
-        if ((0 <= t_sq) && (t_sq <= 63))
-        {
-            pce = pos->pieces[t_sq];
-        }
-        else
-        {
-            pce = e;
-        }
-        while ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1)) {
-            if (pce != e) {
-                if (IsRQ(pce) && PieceCol[pce] == side) {
-                    return TRUE;
-                }
-                break;
-            }
-            cs = COL(t_sq);
-            rs = ROW(t_sq);
-            t_sq += dir;
-            if ((0 <= t_sq) && (t_sq <= 63))
-            {
-                pce = pos->pieces[t_sq];
-            }
-            else
-            {
-                pce = e;
-            }
-            ct = COL(t_sq);
-            rt = ROW(t_sq);
-        }
-    }
-
-    // bishops, queens
-    for (index = 0; index < 4; ++index) {
-        dir = BiDir[index];
-        t_sq = sq + dir;
-        cs = COL(sq);
-        rs = ROW(sq);
-        ct = COL(t_sq);
-        rt = ROW(t_sq);
-
-        if ((0 <= t_sq) && (t_sq <= 63))
-        {
-            pce = pos->pieces[t_sq];
-        }
-        else
-        {
-            pce = e;
-        }
-        while ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1)) {
-            if (pce != e) {
-                if (IsBQ(pce) && PieceCol[pce] == side) {
-                    return TRUE;
-                }
-                break;
-            }
-            cs = COL(t_sq);
-            rs = ROW(t_sq);
-            t_sq += dir; //if (sq == 4 && dir == 7) { printf("t_sq %d\n", t_sq); }
-            if ((0 <= t_sq) && (t_sq <= 63))
-            {
-                pce = pos->pieces[t_sq];
-            }
-            else
-            {
-                pce = e;
-            }
-            ct = COL(t_sq);
-            rt = ROW(t_sq);
-        }
-    }
-
-    cs = COL(sq);
-    rs = ROW(sq);
-
-    // kings
-    for (index = 0; index < 8; ++index) {
-        t_sq = sq + KiDir[index];
-        pce = pos->pieces[t_sq];
-        ct = COL(t_sq);
-        rt = ROW(t_sq);
-        if (((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1)) && IsKi(pce) && PieceCol[pce] == side) {
-            return TRUE;
-        }
-    }
-
-    return FALSE;
-
 }
 
 // movegen
 
 #define MOVE(f,t,ca,pro,fl) ( (f) | ((t) << 7) | ( (ca) << 14 ) | ( (pro) << 20 ) | (fl))
 
-//These arrays enable generation of moves for sliding pieces of both sides as they define the starting 
-//index of white and black sliding pieces and when we reach a 0 we have completed one side's sliding pieces 
-const int LoopSlidePce[8] = {
- B, R, Q, 0, b, r, q, 0
-};
-
-const int LoopNonSlidePce[6] = {
- N, K, 0, n, k, 0
-};
-
-const int LoopSlideIndex[2] = { 0, 4 };
-const int LoopNonSlideIndex[2] = { 0, 3 };
-
-//These store the directions for each piece which need to be added to the current square...to get all the squares 
-//where a type of piece indexed by rows can move; 
-
-const int PceDir[13][8] = {
-    { 0, 0, 0, 0, 0, 0, 0 },
-    { 0, 0, 0, 0, 0, 0, 0 },
-    { -6, -17, -15, -10, 6, 17, 15, 10 },
-    { -7, -9, 7, 9, 0, 0, 0, 0 },
-    { -1, -8, 1, 8, 0, 0, 0, 0 },
-    { -1, -8, 1, 8, -7, -9, 7, 9 },
-    { -1, -8, 1, 8, -7, -9, 7, 9 },
-    { 0, 0, 0, 0, 0, 0, 0 },
-    { -6, -17, -15, -10, 6, 17, 15, 10 },
-    { -7, -9, 7, 9, 0, 0, 0, 0 },
-    { -1, -8, 1, 8, 0, 0, 0, 0 },
-    { -1, -8, 1, 8, -7, -9, 7, 9 },
-    { -1, -8, 1, 8, -7, -9, 7, 9 }
-};
-
-//The number of directions for each piece type - for queen 8, bishop and rook 4 
-const int NumDir[13] = {
- 0, 0, 8, 4, 4, 8, 8, 0, 8, 4, 4, 8, 8
-};
-
-void GenerateAllMoves(const S_BOARD* pos, S_MOVELIST* list);
+void GenerateAllMoves(S_BOARD* pos, S_MOVELIST* list);
 
 //checks if a given move is possible on the board or not
 int MoveExists(S_BOARD* pos, const int move) {
@@ -935,7 +1046,7 @@ int MoveExists(S_BOARD* pos, const int move) {
     return FALSE;
 }
 
-static void AddQuietMove(const S_BOARD* pos, int move, S_MOVELIST* list) {
+static void AddQuietMove(S_BOARD* pos, int move, S_MOVELIST* list) {
 
     list->moves[list->count].move = move;
 
@@ -951,21 +1062,21 @@ static void AddQuietMove(const S_BOARD* pos, int move, S_MOVELIST* list) {
     list->count++;
 }
 
-static void AddCaptureMove(const S_BOARD* pos, int move, S_MOVELIST* list) {
+static void AddCaptureMove(S_BOARD* pos, int move, S_MOVELIST* list) {
 
     list->moves[list->count].move = move;
     list->moves[list->count].score = MvvLvaScores[CAPTURED(move)][pos->pieces[FROMSQ(move)]] + 1000000;
     list->count++;
 }
 
-static void AddEnPassantMove(const S_BOARD* pos, int move, S_MOVELIST* list) {
+static void AddEnPassantMove(S_BOARD* pos, int move, S_MOVELIST* list) {
 
     list->moves[list->count].move = move;
     list->moves[list->count].score = 105 + 1000000;
     list->count++;
 }
 
-static void AddWhitePawnCapMove(const S_BOARD* pos, const int from, const int to, const int cap, S_MOVELIST* list) {
+static void AddWhitePawnCapMove(S_BOARD* pos, const int from, const int to, const int cap, S_MOVELIST* list) {
 
     if (RanksBrd[from] == RANK_7) {
         AddCaptureMove(pos, MOVE(from, to, cap, Q, 0), list);
@@ -978,7 +1089,7 @@ static void AddWhitePawnCapMove(const S_BOARD* pos, const int from, const int to
     }
 }
 
-static void AddWhitePawnMove(const S_BOARD* pos, const int from, const int to, S_MOVELIST* list) {
+static void AddWhitePawnMove(S_BOARD* pos, const int from, const int to, S_MOVELIST* list) {
 
     if (RanksBrd[from] == RANK_7) {
         AddQuietMove(pos, MOVE(from, to, e, Q, 0), list);
@@ -991,7 +1102,7 @@ static void AddWhitePawnMove(const S_BOARD* pos, const int from, const int to, S
     }
 }
 
-static void AddBlackPawnCapMove(const S_BOARD* pos, const int from, const int to, const int cap, S_MOVELIST* list) {
+static void AddBlackPawnCapMove(S_BOARD* pos, const int from, const int to, const int cap, S_MOVELIST* list) {
 
     if (RanksBrd[from] == RANK_2) {
         AddCaptureMove(pos, MOVE(from, to, cap, q, 0), list);
@@ -1004,7 +1115,7 @@ static void AddBlackPawnCapMove(const S_BOARD* pos, const int from, const int to
     }
 }
 
-static void AddBlackPawnMove(const S_BOARD* pos, const int from, const int to, S_MOVELIST* list) {
+static void AddBlackPawnMove(S_BOARD* pos, const int from, const int to, S_MOVELIST* list) {
 
     if (RanksBrd[from] == RANK_2) {
         AddQuietMove(pos, MOVE(from, to, e, q, 0), list);
@@ -1017,457 +1128,475 @@ static void AddBlackPawnMove(const S_BOARD* pos, const int from, const int to, S
     }
 }
 
-void GenerateAllMoves(const S_BOARD* pos, S_MOVELIST* list) {
+static void GenerateMajorPieceMoves(S_BOARD* pos, int piece, int color, S_MOVELIST* list) {
+    U64 PieceBoard = pos->PieceBB[piece];
+    
+    while (PieceBoard) {
+        int from = PopBit(&PieceBoard);
+        U64 AttackBoard;
 
+        if (color == WHITE)
+        {
+            switch (piece) {
+            case N: AttackBoard = KnightAttacks[from]; break;
+            case B: AttackBoard = BishopAttacks(pos, from); break;
+            case R: AttackBoard = RookAttacks(pos, from); break;
+            case Q: AttackBoard = BishopAttacks(pos, from) | RookAttacks(pos, from); break;
+            }
+        }
+        else
+        {
+            switch (piece) {
+            case n: AttackBoard = KnightAttacks[from]; break;
+            case b: AttackBoard = BishopAttacks(pos, from); break;
+            case r: AttackBoard = RookAttacks(pos, from); break;
+            case q: AttackBoard = BishopAttacks(pos, from) | RookAttacks(pos, from); break;
+            }
+        }
+
+        int to;
+        U64 NonattackingMoves = AttackBoard & ~(pos->ColorBB[BOTH]);
+        while (NonattackingMoves) {
+            to = PopBit(&NonattackingMoves);
+            AddQuietMove(pos, MOVE(from, to, 0, 0, 0), list);
+        }
+
+        U64 AttackingMoves;
+        if (color == WHITE)
+        { 
+            AttackingMoves = AttackBoard & pos->ColorBB[BLACK];
+        }
+        else
+        {
+            AttackingMoves = AttackBoard & pos->ColorBB[WHITE];
+        }
+        while (AttackingMoves) {
+            int to = PopBit(&AttackingMoves);
+            int CapturedPiece = pos->pieces[to];
+            AddCaptureMove(pos, MOVE(from, to, CapturedPiece, 0, 0), list);
+        }
+    }
+}
+
+static void GenerateMajorPieceCaptures(S_BOARD* pos, int piece, int color, S_MOVELIST* list) {
+    U64 PieceBoard = pos->PieceBB[piece], AttackBoard, AttackingMoves;
+    int from, to, CapturedPiece;
+    while (PieceBoard)
+    {
+        from = PopBit(&PieceBoard);
+        if (color == WHITE)
+        {
+            switch (piece) {
+            case N: AttackBoard = KnightAttacks[from]; break;
+            case B: AttackBoard = BishopAttacks(pos, from); break;
+            case R: AttackBoard = RookAttacks(pos, from); break;
+            case Q: AttackBoard = BishopAttacks(pos, from) | RookAttacks(pos, from); break;
+            }
+        }
+        else
+        {
+            switch (piece) {
+            case n: AttackBoard = KnightAttacks[from]; break;
+            case b: AttackBoard = BishopAttacks(pos, from); break;
+            case r: AttackBoard = RookAttacks(pos, from); break;
+            case q: AttackBoard = BishopAttacks(pos, from) | RookAttacks(pos, from); break;
+            }
+        }
+
+        if (color == WHITE)
+        {
+            AttackingMoves = AttackBoard & pos->ColorBB[BLACK];
+        }
+        else
+        {
+            AttackingMoves = AttackBoard & pos->ColorBB[WHITE];
+        }
+        while (AttackingMoves) {
+            to = PopBit(&AttackingMoves);
+            int CapturedPiece = pos->pieces[to];
+            AddCaptureMove(pos, MOVE(from, to, CapturedPiece, 0, 0), list);
+        }
+    }
+}
+
+#define FileOf(sq) ((sq) % (8))
+//remainder on dividing
+#define RankOf(sq) ((sq) / (8))
+
+#define bbColor(color) (pos -> ColorBB[color])
+#define bbPiece(piece) (pos -> PieceBB[piece])
+#define PieceOnSquare(sq) (pos->pieces[sq])
+#define Side() (pos->side)
+
+int GetWhitePieceAt(S_BOARD* pos, U64 targetSquare) {
+    for (int piece = P; piece <= K; piece++) {
+        if ((pos->PieceBB[piece] & targetSquare) != 0ULL) return piece;
+    }
+    return -1;
+}
+
+int GetBlackPieceAt(S_BOARD* pos, U64 targetSquare) {
+    for (int piece = p; piece <= k; piece++) {
+        if ((pos->PieceBB[piece] & targetSquare) != 0ULL) return piece;
+    }
+    return -1;
+}
+
+static void GenerateWhitePawnMoves(S_BOARD* pos, S_MOVELIST* list) {
+    U64 advance1 = (pos->PieceBB[P] << 8) & ~(pos->ColorBB[2]);
+    U64 advance2 = ((advance1 & RANK_3_MASK) << 8) & ~(pos->ColorBB[2]);
+    int to, from, captured; U64 leftAttacks, rightAttacks;
+    while (advance1 & NOT_RANK_8_MASK) {
+        to = peekBit(advance1 & NOT_RANK_8_MASK); PopBit(&advance1);
+        AddWhitePawnMove(pos, to - 8, to, list);
+
+    }
+    while (advance1) {
+        to = PopBit(&advance1);
+        from = to - 8;
+        AddWhitePawnMove(pos, from, to, list);
+    }
+    while (advance2) {
+        to = PopBit(&advance2);
+        AddQuietMove(pos, MOVE(to - 16, to, e, e, MFLAGPS), list);
+    }
+
+    leftAttacks = (pos->PieceBB[P] << 7) & NOT_FILE_H_MASK & (pos->ColorBB[BLACK] | SetMask[pos->enPas]);
+    while (leftAttacks & NOT_RANK_8_MASK) {
+        to = peekBit(leftAttacks & NOT_RANK_8_MASK); PopBit(&leftAttacks);
+        from = to - 7;
+        if (to == pos->enPas) {
+            AddEnPassantMove(pos, MOVE(from, to, e, e, MFLAGEP), list);
+        }
+        else {
+            captured = GetBlackPieceAt(pos, 1ULL << to);
+            AddWhitePawnCapMove(pos, from, to, captured, list);
+        }
+    }
+    while (leftAttacks) {
+        to = PopBit(&leftAttacks);
+        from = to - 7;
+        captured = GetBlackPieceAt(pos, 1ULL << to);
+        AddWhitePawnCapMove(pos, from, to, captured, list);
+
+    }
+
+    rightAttacks = (pos->PieceBB[P] << 9) & NOT_FILE_A_MASK & (pos->ColorBB[BLACK] | SetMask[pos->enPas]);
+    while (rightAttacks & NOT_RANK_8_MASK) {
+        to = peekBit(rightAttacks & NOT_RANK_8_MASK); PopBit(&rightAttacks);
+        from = to - 9;
+        if (to == pos->enPas) {
+            AddEnPassantMove(pos, MOVE(from, to, e, e, MFLAGEP), list);
+        }
+        else {
+            captured = GetBlackPieceAt(pos, 1ULL << to);
+            AddWhitePawnCapMove(pos, from, to, captured, list);
+        }
+    }
+    while (rightAttacks) {
+        to = PopBit(&rightAttacks);
+        from = to - 9;
+        captured = GetBlackPieceAt(pos, 1ULL << to);
+        AddWhitePawnCapMove(pos, from, to, captured, list);
+    }
+}
+static void GenerateWhitePawnCaptures(S_BOARD* pos, S_MOVELIST* list) {
+    int to, from, captured;
+    U64 leftAttacks = (pos->PieceBB[P] << 7) & NOT_FILE_H_MASK & (pos->ColorBB[BLACK] | SetMask[pos->enPas]);
+    while (leftAttacks & NOT_RANK_8_MASK) {
+        to = peekBit(leftAttacks & NOT_RANK_8_MASK); PopBit(&leftAttacks);
+        from = to - 7;
+        if (to == pos->enPas) {
+            AddEnPassantMove(pos, MOVE(from, to, e, e, MFLAGEP), list);
+        }
+        else {
+            captured = GetBlackPieceAt(pos, 1ULL << to);
+            AddWhitePawnCapMove(pos, from, to, captured, list);
+        }
+    }
+    while (leftAttacks) {
+        to = peekBit(leftAttacks); PopBit(&leftAttacks);
+        from = to - 7;
+        captured = GetBlackPieceAt(pos, 1ULL << to);
+        AddWhitePawnCapMove(pos, from, to, captured, list);
+    }
+    U64 rightAttacks = (pos->PieceBB[P] << 9) & NOT_FILE_A_MASK & (pos->ColorBB[BLACK] | SetMask[pos->enPas]);
+    while (rightAttacks & NOT_RANK_8_MASK) {
+        to = peekBit(rightAttacks & NOT_RANK_8_MASK); PopBit(&rightAttacks);
+        from = to - 9;
+        if (to == pos->enPas) {
+            AddEnPassantMove(pos, MOVE(from, to, e, e, MFLAGEP), list);
+        }
+        else {
+            captured = GetBlackPieceAt(pos, 1ULL << to);
+            AddWhitePawnCapMove(pos, from, to, captured, list);
+        }
+    }
+    while (rightAttacks) {
+        to = PopBit(&rightAttacks);
+        from = to - 9;
+        captured = GetBlackPieceAt(pos, 1ULL << to);
+        AddWhitePawnCapMove(pos, from, to, captured, list);
+    }
+}
+
+static void GenerateBlackPawnMoves(S_BOARD* pos, S_MOVELIST* list) {
+    U64 advance1 = (pos->PieceBB[p] >> 8) & ~(pos->ColorBB[2]);
+    U64 advance2 = ((advance1 & RANK_6_MASK) >> 8) & ~(pos->ColorBB[2]);
+    int to, from, captured; U64 leftAttacks, rightAttacks;
+    while (advance1 & RANK_1_MASK) {
+        to = peekBit(advance1 & RANK_1_MASK); PopBit(&advance1);
+        AddBlackPawnMove(pos, to + 8, to, list);
+
+    }
+    while (advance1) {
+        to = PopBit(&advance1);
+        from = to + 8;
+        AddBlackPawnMove(pos, from, to, list);
+    }
+    while (advance2) {
+        to = PopBit(&advance2);
+        AddQuietMove(pos, MOVE(to + 16, to, e, e, MFLAGPS), list);
+    }
+
+    leftAttacks = (pos->PieceBB[p] >> 7)& NOT_FILE_A_MASK & (pos->ColorBB[WHITE] | SetMask[pos->enPas]);
+    while (leftAttacks & RANK_1_MASK) {
+        to = peekBit(leftAttacks & RANK_1_MASK); PopBit(&leftAttacks);
+        from = to + 7;
+        captured = GetWhitePieceAt(pos, 1ULL << to);
+        AddBlackPawnCapMove(pos, from, to, captured, list);
+    }
+
+    
+    while (leftAttacks) {
+        to = PopBit(&leftAttacks);
+        from = to + 7;
+        if (to == pos->enPas) {
+            AddEnPassantMove(pos, MOVE(from, to, e, e, MFLAGEP), list);
+        }
+        else {
+            captured = GetWhitePieceAt(pos, 1ULL << to);
+            AddBlackPawnCapMove(pos, from, to, captured, list);
+        }
+    }
+    
+    rightAttacks = (pos->PieceBB[p] >> 9) & NOT_FILE_H_MASK& (pos->ColorBB[WHITE] | SetMask[pos->enPas]);
+    while (rightAttacks & RANK_1_MASK) {
+        to = peekBit(rightAttacks & RANK_1_MASK); PopBit(&rightAttacks);
+        from = to + 9;
+        captured = GetWhitePieceAt(pos, 1ULL << to);
+        AddBlackPawnCapMove(pos, from, to, captured, list);
+    }
+    while (rightAttacks) {
+        to = PopBit(&rightAttacks);
+        from = to + 9;
+        if (to == pos->enPas) {
+            AddEnPassantMove(pos, MOVE(from, to, e, e, MFLAGEP), list);
+        }
+        else {
+            captured = GetWhitePieceAt(pos, 1ULL << to);
+            AddBlackPawnCapMove(pos, from, to, captured, list);
+        }
+    }
+}
+
+static void GenerateBlackPawnCaptures(S_BOARD* pos, S_MOVELIST* list) {
+    int to, from, captured; U64 leftAttacks, rightAttacks;
+    leftAttacks = (pos->PieceBB[p] >> 7) & NOT_FILE_A_MASK & (pos->ColorBB[WHITE] | SetMask[pos->enPas]);
+    while (leftAttacks & RANK_1_MASK) {
+        to = peekBit(leftAttacks & RANK_1_MASK); PopBit(&leftAttacks);
+        from = to + 7;
+        captured = GetWhitePieceAt(pos, 1ULL << to);
+        AddBlackPawnCapMove(pos, from, to, captured, list);
+    }
+
+    while (leftAttacks) {
+        to = PopBit(&leftAttacks);
+        from = to + 7;
+        if (to == pos->enPas) {
+            AddEnPassantMove(pos, MOVE(from, to, e, e, MFLAGEP), list);
+        }
+        else {
+            captured = GetWhitePieceAt(pos, 1ULL << to);
+            AddBlackPawnCapMove(pos, from, to, captured, list);
+        }
+    }
+
+    rightAttacks = (pos->PieceBB[p] >> 9)& NOT_FILE_H_MASK & (pos->ColorBB[WHITE] | SetMask[pos->enPas]);
+    while (rightAttacks & RANK_1_MASK) {
+        to = peekBit(rightAttacks & RANK_1_MASK); PopBit(&rightAttacks);
+        from = to + 9;
+        captured = GetWhitePieceAt(pos, 1ULL << to);
+        AddBlackPawnCapMove(pos, from, to, captured, list);
+    }
+    while (rightAttacks) {
+        to = PopBit(&rightAttacks);
+        from = to + 9;
+        if (to == pos->enPas) {
+            AddEnPassantMove(pos, MOVE(from, to, e, e, MFLAGEP), list);
+        }
+        else {
+            captured = GetWhitePieceAt(pos, 1ULL << to);
+            AddBlackPawnCapMove(pos, from, to, captured, list);
+        }
+    }
+}
+
+static void GenerateKingMoves(S_BOARD* pos, int color, S_MOVELIST* list) {
+    int from, to, captured;
+    U64 moves, attacks;
+
+    if (color == WHITE)
+    {
+       from = Lsb(pos->PieceBB[K]);
+    }
+    else
+    {
+        from = Lsb(pos->PieceBB[k]);
+    }
+
+    moves = KingAttacks[from] & ~(pos->ColorBB[2]);
+    while (moves) {
+        to = PopBit(&moves);
+        AddQuietMove(pos, MOVE(from, to, e, e, 0), list);
+    }
+
+    if (color == WHITE)
+    {
+        attacks = KingAttacks[from] & pos->ColorBB[BLACK];
+    }
+    else
+    {
+        attacks = KingAttacks[from] & pos->ColorBB[WHITE];
+    }
+    
+    while (attacks) {
+        to = PopBit(&attacks);
+        if (color == WHITE)
+        {
+            captured = GetBlackPieceAt(pos, 1ULL << to);
+            AddCaptureMove(pos, MOVE(from, to, captured, e, 0), list);
+        }
+        else
+        {
+            captured = GetWhitePieceAt(pos, 1ULL << to);
+            AddCaptureMove(pos, MOVE(from, to, captured, e, 0), list);
+        }
+        
+    }
+    if (color == WHITE)
+    {
+        if ((pos->castlePerm & WKCA) && ((~(pos->ColorBB[2]) & 0x0000000000000060) == 0x0000000000000060)) {
+            if (!AttackedByBlack(pos, e1) && !AttackedByBlack(pos, f1)) {
+                AddQuietMove(pos, MOVE(e1, g1, e, e, MFLAGCA), list);
+            }
+        }
+        if ((pos->castlePerm & WQCA) && ((~(pos->ColorBB[2]) & 0x000000000000000E) == 0x000000000000000E)) {
+            if (!AttackedByBlack(pos, e1) && !AttackedByBlack(pos, d1)) {
+                AddQuietMove(pos, MOVE(e1, c1, e, e, MFLAGCA), list);
+            }
+        }
+    }
+    else
+    {
+        if ((pos->castlePerm & BKCA) && ((~(pos->ColorBB[2]) & 0x6000000000000000) == 0x6000000000000000)) {
+            if (!AttackedByWhite(pos, e8) && !AttackedByWhite(pos, f8)) {
+                AddQuietMove(pos, MOVE(e8, g8, e, e, MFLAGCA), list);
+            }
+        }
+        if ((pos->castlePerm & BQCA) && ((~(pos->ColorBB[2]) & 0x0E00000000000000) == 0x0E00000000000000)) {
+            if (!AttackedByWhite(pos, e8) && !AttackedByWhite(pos, d8)) {
+                AddQuietMove(pos, MOVE(e8, c8, e, e, MFLAGCA), list);
+            }
+        }
+    }
+}
+
+static void GenerateKingCaptures(S_BOARD* pos, int color, S_MOVELIST* list) {
+    int from, to, captured;
+    U64 moves, attacks;
+
+    if (color == WHITE)
+    {
+        from = Lsb(pos->PieceBB[K]);
+    }
+    else
+    {
+        from = Lsb(pos->PieceBB[k]);
+    }
+
+    if (color == WHITE)
+    {
+        attacks = KingAttacks[from] & pos->ColorBB[BLACK];
+    }
+    else
+    {
+        attacks = KingAttacks[from] & pos->ColorBB[WHITE];
+    }
+
+    while (attacks) {
+        to = PopBit(&attacks);
+        if (color == WHITE)
+        {
+            captured = GetBlackPieceAt(pos, 1ULL << to);
+            AddCaptureMove(pos, MOVE(from, to, captured, e, 0), list);
+        }
+        else
+        {
+            captured = GetWhitePieceAt(pos, 1ULL << to);
+            AddCaptureMove(pos, MOVE(from, to, captured, e, 0), list);
+        }
+
+    }
+}
+
+void GenerateAllMoves(S_BOARD* pos, S_MOVELIST* list) {
     list->count = 0;
-
-    int pce = e;
-    int side = pos->side;
-    int sq = 0; int t_sq = 0;
-    int pceNum = 0;
-    int dir = 0;
-    int index = 0;
-    int pceIndex = 0;
-
-    int cs, ct, rs, rt;
-
-    if (side == WHITE) {
-
-        for (pceNum = 0; pceNum < pos->pceNum[P]; ++pceNum) {
-            sq = pos->pList[P][pceNum];
-
-            if ((sq + 8 <= 63) && pos->pieces[sq + 8] == e) {
-                AddWhitePawnMove(pos, sq, sq + 8, list);
-                if (RanksBrd[sq] == RANK_2 && pos->pieces[sq + 16] == e) {
-                    AddQuietMove(pos, MOVE(sq, (sq + 16), e, e, MFLAGPS), list);
-                }
-            }
-
-            t_sq = sq + 7;
-            cs = COL(sq);
-            ct = COL(t_sq);
-            rs = ROW(sq);
-            rt = ROW(t_sq);
-            if ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1) && (PieceCol[pos->pieces[sq + 7]] == BLACK)) {
-                AddWhitePawnCapMove(pos, sq, sq + 7, pos->pieces[sq + 7], list);
-            }
-            t_sq = sq + 9;
-            ct = COL(t_sq);
-            rt = ROW(t_sq);
-            if ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1) && (PieceCol[pos->pieces[sq + 9]] == BLACK)) {
-                AddWhitePawnCapMove(pos, sq, sq + 9, pos->pieces[sq + 9], list);
-            }
-
-            if (pos->enPas != no_sq) {
-                ct = COL(sq + 7);
-                if ((sq + 7 == pos->enPas) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-                    AddEnPassantMove(pos, MOVE(sq, sq + 7, e, e, MFLAGEP), list);
-                }
-                ct = COL(sq + 9);
-                if ((sq + 9 == pos->enPas) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-                    AddEnPassantMove(pos, MOVE(sq, sq + 9, e, e, MFLAGEP), list);
-                }
-            }
-        }
-
-        if (pos->castlePerm & WKCA) {
-            if (pos->pieces[f1] == e && pos->pieces[g1] == e) {
-                if (!SqAttacked(e1, BLACK, pos) && !SqAttacked(f1, BLACK, pos)) {
-                    AddQuietMove(pos, MOVE(e1, g1, e, e, MFLAGCA), list);
-                }
-            }
-        }
-
-        if (pos->castlePerm & WQCA) {
-            if (pos->pieces[d1] == e && pos->pieces[c1] == e && pos->pieces[b1] == e) {
-                if (!SqAttacked(e1, BLACK, pos) && !SqAttacked(d1, BLACK, pos)) {
-                    AddQuietMove(pos, MOVE(e1, c1, e, e, MFLAGCA), list);
-                }
-            }
-        }
-
+    if (pos->side == WHITE) {
+        GenerateWhitePawnMoves(pos, list);
+        GenerateKingMoves(pos, WHITE, list);
+        GenerateMajorPieceMoves(pos, N, WHITE, list);
+        GenerateMajorPieceMoves(pos, B, WHITE, list);
+        GenerateMajorPieceMoves(pos, R, WHITE, list);
+        GenerateMajorPieceMoves(pos, Q, WHITE, list);
     }
     else {
-
-        for (pceNum = 0; pceNum < pos->pceNum[p]; ++pceNum) {
-            sq = pos->pList[p][pceNum];
-
-            if ((0 <= sq - 8) && pos->pieces[sq - 8] == e) {
-                AddBlackPawnMove(pos, sq, sq - 8, list);
-                if (RanksBrd[sq] == RANK_7 && pos->pieces[sq - 16] == e) {
-                    AddQuietMove(pos, MOVE(sq, (sq - 16), e, e, MFLAGPS), list);
-                }
-            }
-
-            t_sq = sq - 7;
-            cs = COL(sq);
-            ct = COL(t_sq);
-            rs = ROW(sq);
-            rt = ROW(t_sq);
-            if ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1) && (PieceCol[pos->pieces[sq - 7]] == WHITE)) {
-                AddBlackPawnCapMove(pos, sq, sq - 7, pos->pieces[sq - 7], list);
-            }
-            t_sq = sq - 9;
-            ct = COL(t_sq);
-            rt = ROW(t_sq);
-            if ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1) && (PieceCol[pos->pieces[sq - 9]] == WHITE)) {
-                AddBlackPawnCapMove(pos, sq, sq - 9, pos->pieces[sq - 9], list);
-            }
-            if (pos->enPas != no_sq) {
-                ct = COL(sq - 7);
-                if ((sq - 7 == pos->enPas) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-                    AddEnPassantMove(pos, MOVE(sq, sq - 7, e, e, MFLAGEP), list);
-                }
-                ct = COL(sq - 9);
-                if ((sq - 9 == pos->enPas) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-                    AddEnPassantMove(pos, MOVE(sq, sq - 9, e, e, MFLAGEP), list);
-                }
-            }
-        }
-
-        // castling
-        if (pos->castlePerm & BKCA) {
-            if (pos->pieces[f8] == e && pos->pieces[g8] == e) {
-                if (!SqAttacked(e8, WHITE, pos) && !SqAttacked(f8, WHITE, pos)) {
-                    AddQuietMove(pos, MOVE(e8, g8, e, e, MFLAGCA), list);
-                }
-            }
-        }
-
-        if (pos->castlePerm & BQCA) {
-            if (pos->pieces[d8] == e && pos->pieces[c8] == e && pos->pieces[b8] == e) {
-                if (!SqAttacked(e8, WHITE, pos) && !SqAttacked(d8, WHITE, pos)) {
-                    AddQuietMove(pos, MOVE(e8, c8, e, e, MFLAGCA), list);
-                }
-            }
-        }
-    }
-
-    //The break statement ends the loop immediately when it is encountered. 
-    //The continue statement skips the current iteration of the loop and continues with the next iteration. 
-
-    /* Loop for slider pieces */
-    pceIndex = LoopSlideIndex[side];
-    pce = LoopSlidePce[pceIndex++];
-    while (pce != 0) {		
-
-        for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-            sq = pos->pList[pce][pceNum];
-
-            for (index = 0; index < NumDir[pce]; ++index) {
-                dir = PceDir[pce][index];
-                t_sq = sq + dir;
-
-                cs = COL(sq);
-                ct = COL(t_sq);
-                rs = ROW(sq);
-                rt = ROW(t_sq);
-
-                while ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1)) {
-                    // BLACK ^ 1 == WHITE       WHITE ^ 1 == BLACK
-                    if (pos->pieces[t_sq] != e) {
-                        if (PieceCol[pos->pieces[t_sq]] == (side ^ 1)) {
-                            AddCaptureMove(pos, MOVE(sq, t_sq, pos->pieces[t_sq], e, 0), list);
-                        }
-                        break;
-                    }
-                    AddQuietMove(pos, MOVE(sq, t_sq, e, e, 0), list);
-                    cs = COL(t_sq);
-                    rs = ROW(t_sq);
-                    t_sq += dir;
-                    ct = COL(t_sq);
-                    rt = ROW(t_sq);
-                }
-            }
-        }
-
-        pce = LoopSlidePce[pceIndex++];
-    }
-
-    /* Loop for non slider */
-    pceIndex = LoopNonSlideIndex[side];
-    pce = LoopNonSlidePce[pceIndex++];
-
-    while (pce != 0) {
-
-        for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-            sq = pos->pList[pce][pceNum];
-
-            for (index = 0; index < NumDir[pce]; ++index) {
-                dir = PceDir[pce][index];
-                t_sq = sq + dir;
-
-                cs = COL(sq);
-                ct = COL(t_sq);
-                rs = ROW(sq);
-                rt = ROW(t_sq);
-
-                if ((pce == N || pce == n) && !((0 <= t_sq) && (t_sq <= 63) && (-2 <= (cs - ct)) && ((cs - ct) <= 2) && (-2 <= (rs - rt)) && ((rs - rt) <= 2)))
-                {
-                    continue;
-                }
-
-                if ((pce == K || pce == k) && !((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1)))
-                {
-                    continue;
-                }
-
-                // BLACK ^ 1 == WHITE       WHITE ^ 1 == BLACK
-                if (pos->pieces[t_sq] != e) {
-                    if (PieceCol[pos->pieces[t_sq]] == (side ^ 1)) {
-                        AddCaptureMove(pos, MOVE(sq, t_sq, pos->pieces[t_sq], e, 0), list);
-                    }
-                    continue;
-                }
-                AddQuietMove(pos, MOVE(sq, t_sq, e, e, 0), list);
-            }
-        }
-
-        pce = LoopNonSlidePce[pceIndex++];
+        GenerateBlackPawnMoves(pos, list);
+        GenerateKingMoves(pos, BLACK, list);
+        GenerateMajorPieceMoves(pos, n, BLACK, list);
+        GenerateMajorPieceMoves(pos, b, BLACK, list);
+        GenerateMajorPieceMoves(pos, r, BLACK, list);
+        GenerateMajorPieceMoves(pos, q, BLACK, list);
     }
 }
 
 //Mostly the same function as GenerateAllMoves, but it only generates the capture moves which are required in the Quiescence search function
 
-void GenerateAllCaps(const S_BOARD* pos, S_MOVELIST* list) {
-
+void GenerateAllCaps(S_BOARD* pos, S_MOVELIST* list) {
     list->count = 0;
-
-    int pce = e;
-    int side = pos->side;
-    int sq = 0; int t_sq = 0;
-    int pceNum = 0;
-    int dir = 0;
-    int index = 0;
-    int pceIndex = 0;
-
-    int cs, ct, rs, rt;
-
-    if (side == WHITE) {
-
-        for (pceNum = 0; pceNum < pos->pceNum[P]; ++pceNum) {
-            sq = pos->pList[P][pceNum];
-
-            t_sq = sq + 7;
-            cs = COL(sq);
-            ct = COL(t_sq);
-            rs = ROW(sq);
-            rt = ROW(t_sq);
-            if ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1) && (PieceCol[pos->pieces[sq + 7]] == BLACK)) {
-                AddWhitePawnCapMove(pos, sq, sq + 7, pos->pieces[sq + 7], list);
-            }
-            t_sq = sq + 9;
-            ct = COL(t_sq);
-            rt = ROW(t_sq);
-            if ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1) && PieceCol[pos->pieces[sq + 9]] == BLACK) {
-                AddWhitePawnCapMove(pos, sq, sq + 9, pos->pieces[sq + 9], list);
-            }
-
-            if (pos->enPas != no_sq) {
-                ct = COL(sq + 7);
-                if ((sq + 7 == pos->enPas) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-                    AddEnPassantMove(pos, MOVE(sq, sq + 7, e, e, MFLAGEP), list);
-                }
-                ct = COL(sq + 9);
-                if ((sq + 9 == pos->enPas) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-                    AddEnPassantMove(pos, MOVE(sq, sq + 9, e, e, MFLAGEP), list);
-                }
-            }
-        }
-
+    if (pos->side == WHITE) {
+        GenerateWhitePawnCaptures(pos, list);
+        GenerateKingCaptures(pos, WHITE, list);
+        GenerateMajorPieceCaptures(pos, N, WHITE, list);
+        GenerateMajorPieceCaptures(pos, B, WHITE, list);
+        GenerateMajorPieceCaptures(pos, R, WHITE, list);
+        GenerateMajorPieceCaptures(pos, Q, WHITE, list);
     }
     else {
-
-        for (pceNum = 0; pceNum < pos->pceNum[p]; ++pceNum) {
-            sq = pos->pList[p][pceNum];
-
-            t_sq = sq - 7;
-            cs = COL(sq);
-            ct = COL(t_sq);
-            rs = ROW(sq);
-            rt = ROW(t_sq);
-            if ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1) && (PieceCol[pos->pieces[sq - 7]] == WHITE)) {
-                AddBlackPawnCapMove(pos, sq, sq - 7, pos->pieces[sq - 7], list);
-            }
-            t_sq = sq - 9;
-            ct = COL(t_sq);
-            rt = ROW(t_sq);
-            if ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1) && (PieceCol[pos->pieces[sq - 9]] == WHITE)) {
-                AddBlackPawnCapMove(pos, sq, sq - 9, pos->pieces[sq - 9], list);
-            }
-            if (pos->enPas != no_sq) {
-                ct = COL(sq - 7);
-                if ((sq - 7 == pos->enPas) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-                    AddEnPassantMove(pos, MOVE(sq, sq - 7, e, e, MFLAGEP), list);
-                }
-                ct = COL(sq - 9);
-                if ((sq - 9 == pos->enPas) && (-1 <= (cs - ct)) && ((cs - ct) <= 1)) {
-                    AddEnPassantMove(pos, MOVE(sq, sq - 9, e, e, MFLAGEP), list);
-                }
-            }
-        }
+        GenerateBlackPawnCaptures(pos, list);
+        GenerateKingCaptures(pos, BLACK, list);
+        GenerateMajorPieceCaptures(pos, n, BLACK, list);
+        GenerateMajorPieceCaptures(pos, b, BLACK, list);
+        GenerateMajorPieceCaptures(pos, r, BLACK, list);
+        GenerateMajorPieceCaptures(pos, q, BLACK, list);
     }
-
-    /* Loop for slider pieces */
-    pceIndex = LoopSlideIndex[side];
-    pce = LoopSlidePce[pceIndex++];
-    while (pce != 0) {
-
-        for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-            sq = pos->pList[pce][pceNum];
-
-            for (index = 0; index < NumDir[pce]; ++index) {
-                dir = PceDir[pce][index];
-                t_sq = sq + dir;
-
-                cs = COL(sq);
-                ct = COL(t_sq);
-                rs = ROW(sq);
-                rt = ROW(t_sq);
-
-                while ((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1)) {
-                    // BLACK ^ 1 == WHITE       WHITE ^ 1 == BLACK
-                    if (pos->pieces[t_sq] != e) {
-                        if (PieceCol[pos->pieces[t_sq]] == (side ^ 1)) {
-                            AddCaptureMove(pos, MOVE(sq, t_sq, pos->pieces[t_sq], e, 0), list);
-                        }
-                        break;
-                    }
-                    cs = COL(t_sq);
-                    rs = ROW(t_sq);
-                    t_sq += dir;
-                    ct = COL(t_sq);
-                    rt = ROW(t_sq);
-                }
-            }
-        }
-
-        pce = LoopSlidePce[pceIndex++];
-    }
-
-    /* Loop for non slider */
-    pceIndex = LoopNonSlideIndex[side];
-    pce = LoopNonSlidePce[pceIndex++];
-
-    while (pce != 0) {
-
-        for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-            sq = pos->pList[pce][pceNum];
-
-            for (index = 0; index < NumDir[pce]; ++index) {
-                dir = PceDir[pce][index];
-                t_sq = sq + dir;
-
-                cs = COL(sq);
-                ct = COL(t_sq);
-                rs = ROW(sq);
-                rt = ROW(t_sq);
-
-                if ((pce == N || pce == n) && !((0 <= t_sq) && (t_sq <= 63) && (-2 <= (cs - ct)) && ((cs - ct) <= 2) && (-2 <= (rs - rt)) && ((rs - rt) <= 2)))
-                {
-                    continue;
-                }
-
-                if ((pce == K || pce == k) && !((0 <= t_sq) && (t_sq <= 63) && (-1 <= (cs - ct)) && ((cs - ct) <= 1) && (-1 <= (rs - rt)) && ((rs - rt) <= 1)))
-                {
-                    continue;
-                }
-
-                // BLACK ^ 1 == WHITE       WHITE ^ 1 == BLACK
-                if (pos->pieces[t_sq] != e) {
-                    if (PieceCol[pos->pieces[t_sq]] == (side ^ 1)) {
-                        AddCaptureMove(pos, MOVE(sq, t_sq, pos->pieces[t_sq], e, 0), list);
-                    }
-                    continue;
-                }
-            }
-        }
-
-        pce = LoopNonSlidePce[pceIndex++];
-    }
-}
-
-// bitboards
-
-int Lsb(const U64 bb) {
-    unsigned long index = -1;
-    _BitScanForward64(&index, bb);
-    return index;
-}
-
-// Returns the index of the least significant bit and unsets it
-int PopBit(U64* bb) {
-
-    int lsb = Lsb(*bb);
-    *bb &= (*bb - 1);
-
-    return lsb;
-}
-
-#define CountBits(bb) ((int) (__popcnt64(bb)))
-
-void PrintBitBoard(U64 bb) {
-
-    U64 shiftMe = 1ULL;
-
-    int rank = 0;
-    int file = 0;
-    int sq = 0;
-
-    printf("\n");
-    for (rank = RANK_8; rank >= RANK_1; --rank) {
-        for (file = FILE_A; file <= FILE_H; ++file) {
-            sq = FR2SQ(file, rank);
-
-            if ((shiftMe << sq) & bb)
-                printf("X");
-            else
-                printf("-");
-
-        }
-        printf("\n");
-    }
-    printf("\n\n");
 }
 
 // board
 
-void UpdateListsMaterial(S_BOARD* pos) {
-
-    int piece, sq, index, colour;
-
-    for (index = 0; index < BRD_SQ_NUM; ++index) {
-        sq = index;
-        piece = pos->pieces[index];
-        if (piece != e) {
-            colour = PieceCol[piece];
-
-            if (PieceBig[piece] == TRUE) pos->bigPce[colour]++;
-            if (PieceMin[piece] == TRUE) pos->minPce[colour]++;
-            if (PieceMaj[piece] == TRUE) pos->majPce[colour]++;
-
-            pos->material[colour] += PieceVal[piece];
-
-            pos->pList[piece][pos->pceNum[piece]] = sq;
-            pos->pceNum[piece]++;
-
-            if (piece == K) pos->KingSq[WHITE] = sq;
-            if (piece == k) pos->KingSq[BLACK] = sq;
-
-            if (piece == P) {
-                SETBIT(pos->pawns[WHITE], sq);
-                SETBIT(pos->pawns[BOTH], sq);
-            }
-            else if (piece == p) {
-                SETBIT(pos->pawns[BLACK], sq);
-                SETBIT(pos->pawns[BOTH], sq);
-            }
-        }
-    }
-}
-
 void ResetBoard(S_BOARD* pos);
 U64 GeneratePosKey(const S_BOARD* pos);
+void UpdateListsMaterial(S_BOARD* pos);
 
 //This function takes in a FEN notation character array, and a pointer to S_BOARD structure
 
@@ -1564,6 +1693,87 @@ int ParseFen(char* fen, S_BOARD* pos) {
     return 0;
 }
 
+void UpdateListsMaterial(S_BOARD* pos)
+{
+    int i = 0;
+    while (i < 64)
+    {
+        if ((pos->pieces[i]) == p)
+        {
+            SETBIT(pos->PieceBB[p], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[1], i);
+        }
+        else if((pos->pieces[i]) == r)
+        {
+           SETBIT(pos->PieceBB[r], i);
+           SETBIT(pos->ColorBB[BOTH], i);
+           SETBIT(pos->ColorBB[1], i);
+        }
+        else if ((pos->pieces[i]) == n)
+        {
+            SETBIT(pos->PieceBB[n], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[1], i);
+        }
+        else if ((pos->pieces[i]) == b)
+        {
+            SETBIT(pos->PieceBB[b], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[1], i);
+        }
+        else if ((pos->pieces[i]) == q)
+        {
+            SETBIT(pos->PieceBB[q], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[1], i);
+        }
+        else if ((pos->pieces[i]) == k)
+        {
+            SETBIT(pos->PieceBB[k], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[1], i);
+        }
+        else if ((pos->pieces[i]) == P)
+        {
+            SETBIT(pos->PieceBB[P], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[0], i);
+        }
+        else if ((pos->pieces[i]) == N)
+        {
+            SETBIT(pos->PieceBB[N], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[0], i);
+        }
+        else if ((pos->pieces[i]) == B)
+        {
+            SETBIT(pos->PieceBB[B], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[0], i);
+        }
+        else if ((pos->pieces[i]) == R)
+        {
+            SETBIT(pos->PieceBB[R], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[0], i);
+        }
+        else if ((pos->pieces[i]) == Q)
+        {
+            SETBIT(pos->PieceBB[Q], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[0], i);
+        }
+        else if ((pos->pieces[i]) == K)
+        {
+            SETBIT(pos->PieceBB[K], i);
+            SETBIT(pos->ColorBB[BOTH], i);
+            SETBIT(pos->ColorBB[0], i);
+        }
+        i++;
+    }
+}
+
 void ResetBoard(S_BOARD* pos) {
 
     int index = 0;
@@ -1572,22 +1782,15 @@ void ResetBoard(S_BOARD* pos) {
         pos->pieces[index] = e;
     }
 
-    for (index = 0; index < 2; ++index) {
-        pos->bigPce[index] = 0;
-        pos->majPce[index] = 0;
-        pos->minPce[index] = 0;
-        pos->material[index] = 0;
+    //start with empty piece and color bitboards
+    for (int i = 0; i < 13; i++)
+    {
+        pos->PieceBB[i] = 0ULL;
     }
 
-    for (index = 0; index < 3; ++index) {
-        pos->pawns[index] = 0ULL;
-    }
-
-    for (index = 0; index < 13; ++index) {
-        pos->pceNum[index] = 0;
-    }
-
-    pos->KingSq[WHITE] = pos->KingSq[BLACK] = no_sq;
+    pos->ColorBB[0] = 0ULL;
+    pos->ColorBB[1] = 0ULL;
+    pos->ColorBB[2] = 0ULL;
 
     pos->side = BOTH;
     pos->enPas = no_sq;
@@ -1633,47 +1836,6 @@ void PrintBoard(const S_BOARD* pos) {
         pos->castlePerm & BQCA ? 'q' : '-'
     );
     printf("PosKey:%llX\n", pos->posKey);
-}
-
-void MirrorBoard(S_BOARD* pos) {
-
-    int tempPiecesArray[64];
-    int tempSide = pos->side ^ 1;
-    int SwapPiece[13] = { e, p, n, b, r, q, k, P, N, B, R, Q, K };
-    int tempCastlePerm = 0;
-    int tempEnPas = no_sq;
-
-    int sq;
-    int tp;
-
-    if (pos->castlePerm & WKCA) tempCastlePerm |= BKCA;
-    if (pos->castlePerm & WQCA) tempCastlePerm |= BQCA;
-
-    if (pos->castlePerm & BKCA) tempCastlePerm |= WKCA;
-    if (pos->castlePerm & BQCA) tempCastlePerm |= WQCA;
-
-    if (pos->enPas != no_sq) {
-        tempEnPas = Mirror64[pos->enPas];
-    }
-
-    for (sq = 0; sq < 64; sq++) {
-        tempPiecesArray[sq] = pos->pieces[Mirror64[sq]];
-    }
-
-    ResetBoard(pos);
-
-    for (sq = 0; sq < 64; sq++) {
-        tp = SwapPiece[tempPiecesArray[sq]];
-        pos->pieces[sq] = tp;
-    }
-
-    pos->side = tempSide;
-    pos->castlePerm = tempCastlePerm;
-    pos->enPas = tempEnPas;
-
-    pos->posKey = GeneratePosKey(pos);
-
-    UpdateListsMaterial(pos);
 }
 
 // io
@@ -1861,248 +2023,525 @@ int ProbePvTable(const S_BOARD* pos) {
 
 //evaluate
 
-const int PawnIsolated = -10;
-const int PawnPassed[8] = { 0, 5, 10, 20, 35, 60, 100, 200 };
-const int RookOpenFile = 10;
-const int RookSemiOpenFile = 5;
-const int QueenOpenFile = 5;
-const int QueenSemiOpenFile = 3;
-const int BishopPair = 30;
-
-const int PawnTable[64] = {
-0	,	0	,	0	,	0	,	0	,	0	,	0	,	0	,
-10	,	10	,	0	,	-10	,	-10	,	0	,	10	,	10	,
-5	,	0	,	0	,	5	,	5	,	0	,	0	,	5	,
-0	,	0	,	10	,	20	,	20	,	10	,	0	,	0	,
-5	,	5	,	5	,	10	,	10	,	5	,	5	,	5	,
-10	,	10	,	10	,	20	,	20	,	10	,	10	,	10	,
-20	,	20	,	20	,	30	,	30	,	20	,	20	,	20	,
-0	,	0	,	0	,	0	,	0	,	0	,	0	,	0
+// Piece Square Tables (by Lyudmil)
+const int PawnMG[64] =
+{
+    0,   0,   0,   0,   0,   0,   0,   0,
+    -5,  -2,   4,   5,   5,   4,  -2,  -5,
+    -4,  -2,   5,   7,   7,   5,  -2,  -4,
+    -2,  -1,   9,  13,  13,   9,  -1,  -2,
+    2,   4,  13,  21,  21,  13,   4,   2,
+    10,  21,  25,  29,  29,  25,  21,  10,
+    1,   2,   5,   9,   9,   5,   2,   1,             // Pawns 7 Rank
+    0,   0,   0,   0,   0,   0,   0,   0
 };
 
-const int KnightTable[64] = {
-0	,	-10	,	0	,	0	,	0	,	0	,	-10	,	0	,
-0	,	0	,	0	,	5	,	5	,	0	,	0	,	0	,
-0	,	0	,	10	,	10	,	10	,	10	,	0	,	0	,
-0	,	0	,	10	,	20	,	20	,	10	,	5	,	0	,
-5	,	10	,	15	,	20	,	20	,	15	,	10	,	5	,
-5	,	10	,	10	,	20	,	20	,	10	,	10	,	5	,
-0	,	0	,	5	,	10	,	10	,	5	,	0	,	0	,
-0	,	0	,	0	,	0	,	0	,	0	,	0	,	0
+const int PawnEG[64] =
+{
+    0,   0,   0,   0,   0,   0,   0,   0,
+    -3,  -1,   2,   3,   3,   2,  -1,  -3,
+    -2,  -1,   3,   4,   4,   3,  -1,  -2,
+    -1,   0,   4,   7,   7,   4,   0,  -1,
+    1,   2,   7,  11,  11,   7,   2,   1,
+    5,  11,  13,  14,  14,  13,  11,   5,
+    0,   1,   3,   5,   5,   3,   1,   0,    // Pawns 7 Rank
+    0,   0,   0,   0,   0,   0,   0,   0
 };
 
-const int BishopTable[64] = {
-0	,	0	,	-10	,	0	,	0	,	-10	,	0	,	0	,
-0	,	0	,	0	,	10	,	10	,	0	,	0	,	0	,
-0	,	0	,	10	,	15	,	15	,	10	,	0	,	0	,
-0	,	10	,	15	,	20	,	20	,	15	,	10	,	0	,
-0	,	10	,	15	,	20	,	20	,	15	,	10	,	0	,
-0	,	0	,	10	,	15	,	15	,	10	,	0	,	0	,
-0	,	0	,	0	,	10	,	10	,	0	,	0	,	0	,
-0	,	0	,	0	,	0	,	0	,	0	,	0	,	0
+const int KnightMG[64] =
+{
+    -31, -23, -20, -16, -16, -20, -23, -31,
+    -23, -16, -12,  -8,  -8, -12, -16, -23,
+    -8,  -4,   0,   8,   8,   0,  -4,  -8,
+    -4,   8,  12,  16,  16,  12,   8,  -4,
+    8,  16,  20,  23,  23,  20,  16,   8,
+    23,  27,  31,  35,  35,  31,  27,  23,
+    4,   8,  12,  16,  16,  12,   8,   4,
+    4,   4,   4,   4,   4,   4,   4,   4,
 };
 
-const int RookTable[64] = {
-0	,	0	,	5	,	10	,	10	,	5	,	0	,	0	,
-0	,	0	,	5	,	10	,	10	,	5	,	0	,	0	,
-0	,	0	,	5	,	10	,	10	,	5	,	0	,	0	,
-0	,	0	,	5	,	10	,	10	,	5	,	0	,	0	,
-0	,	0	,	5	,	10	,	10	,	5	,	0	,	0	,
-0	,	0	,	5	,	10	,	10	,	5	,	0	,	0	,
-25	,	25	,	25	,	25	,	25	,	25	,	25	,	25	,
-0	,	0	,	5	,	10	,	10	,	5	,	0	,	0
+const int KnightEG[64] =
+{
+    -39, -27, -23, -20, -20, -23, -27, -39,
+    -27, -20, -12,  -8,  -8, -12, -20, -27,
+    -8,  -4,   0,   8,   8,   0,  -4,  -8,
+    -4,   8,  12,  16,  16,  12,   8,  -4,
+    8,  16,  20,  23,  23,  20,  16,   8,
+    12,  23,  27,  31,  31,  27,  23,  12,
+    -2,   2,   4,   8,   8,   4,   2,  -2,
+    -16,  -8,  -4,  -4,  -4,  -4,  -8, -16,
 };
 
-const int KingE[64] = {
-    -50	,	-10	,	0	,	0	,	0	,	0	,	-10	,	-50	,
-    -10,	0	,	10	,	10	,	10	,	10	,	0	,	-10	,
-    0	,	10	,	20	,	20	,	20	,	20	,	10	,	0	,
-    0	,	10	,	20	,	40	,	40	,	20	,	10	,	0	,
-    0	,	10	,	20	,	40	,	40	,	20	,	10	,	0	,
-    0	,	10	,	20	,	20	,	20	,	20	,	10	,	0	,
-    -10,	0	,	10	,	10	,	10	,	10	,	0	,	-10	,
-    -50	,	-10	,	0	,	0	,	0	,	0	,	-10	,	-50
+const int BishopMG[64] =
+{
+    -31, -23, -20, -16, -16, -20, -23, -31,
+    -23, -16, -12,  -8,  -8, -12, -16, -23,
+    -8,  -4,   0,   8,   8,   0,  -4,  -8,
+    -4,   8,  12,  16,  16,  12,   8,  -4,
+    8,  16,  20,  23,  23,  20,  16,   8,
+    23,  27,  31,  35,  35,  31,  27,  23,
+    4,   8,  12,  16,  16,  12,   8,   4,
+    4,   4,   4,   4,   4,   4,   4,   4,
 };
 
-const int KingO[64] = {
-    0	,	5	,	5	,	-10	,	-10	,	0	,	10	,	5	,
-    -30	,	-30	,	-30	,	-30	,	-30	,	-30	,	-30	,	-30	,
-    -50	,	-50	,	-50	,	-50	,	-50	,	-50	,	-50	,	-50	,
-    -70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,
-    -70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,
-    -70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,
-    -70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,
-    -70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70	,	-70
+const int BishopEG[64] =
+{
+    -39, -27, -23, -20, -20, -23, -27, -39,
+    -27, -20, -12,  -8,  -8, -12, -20, -27,
+    -8,  -4,   0,   8,   8,   0,  -4,  -8,
+    -4,   8,  12,  16,  16,  12,   8,  -4,
+    8,  16,  20,  23,  23,  20,  16,   8,
+    12,  23,  27,  31,  31,  27,  23,  12,
+    -2,   2,   4,   8,   8,   4,   2,  -2,
+    -16,  -8,  -4,  -4,  -4,  -4,  -8, -16,
 };
 
-int MaterialDraw(const S_BOARD* pos) {
-    if (!pos->pceNum[R] && !pos->pceNum[r] && !pos->pceNum[Q] && !pos->pceNum[q]) {
-        if (!pos->pceNum[b] && !pos->pceNum[B]) {
-            if (pos->pceNum[N] < 3 && pos->pceNum[n] < 3) { return TRUE; }
-        }
-        else if (!pos->pceNum[N] && !pos->pceNum[n]) {
-            if (abs(pos->pceNum[B] - pos->pceNum[b]) < 2) { return TRUE; }
-        }
-        else if ((pos->pceNum[N] < 3 && !pos->pceNum[B]) || (pos->pceNum[B] == 1 && !pos->pceNum[N])) {
-            if ((pos->pceNum[n] < 3 && !pos->pceNum[b]) || (pos->pceNum[b] == 1 && !pos->pceNum[n])) { return TRUE; }
-        }
-    }
-    else if (!pos->pceNum[Q] && !pos->pceNum[q]) {
-        if (pos->pceNum[R] == 1 && pos->pceNum[r] == 1) {
-            if ((pos->pceNum[N] + pos->pceNum[B]) < 2 && (pos->pceNum[n] + pos->pceNum[b]) < 2) { return TRUE; }
-        }
-        else if (pos->pceNum[R] == 1 && !pos->pceNum[r]) {
-            if ((pos->pceNum[N] + pos->pceNum[B] == 0) && (((pos->pceNum[n] + pos->pceNum[b]) == 1) || ((pos->pceNum[n] + pos->pceNum[b]) == 2))) { return TRUE; }
-        }
-        else if (pos->pceNum[r] == 1 && !pos->pceNum[R]) {
-            if ((pos->pceNum[n] + pos->pceNum[b] == 0) && (((pos->pceNum[N] + pos->pceNum[B]) == 1) || ((pos->pceNum[N] + pos->pceNum[B]) == 2))) { return TRUE; }
-        }
-    }
-    return FALSE;
+const int RookMG[64] =
+{
+    -10,  -8,  -6,  -4,  -4,  -6,  -8, -10,
+    -8,  -6,  -4,  -2,  -2,  -4,  -6,  -8,
+    -4,  -2,   0,   4,   4,   0,  -2,  -4,
+    -2,   2,   4,   8,   8,   4,   2,  -2,
+    2,   4,   8,  12,  12,   8,   4,   2,
+    4,   8,   12, 16,  16,  12,   8,   4,
+    20,  21,   23, 23,  23,  23,  21,  20,
+    18,  18,   20, 20,  20,  20,  18,  18,
+};
+
+const int RookEG[64] =
+{
+    -10,  -8,  -6,  -4,  -4,  -6,  -8, -10,
+    -8,  -6,  -4,  -2,  -2,  -4,  -6,  -8,
+    -4,  -2,   0,   4,   4,   0,  -2,  -4,
+    -2,   2,   4,   8,   8,   4,   2,  -2,
+    2,   4,   8,  12,  12,   8,   4,   2,
+    4,   8,  12,  16,  16,  12,   8,   4,
+    20,  21,  23,  23,  23,  23,  21,  20,
+    18,  18,  20,  20,  20,  20,  18,  18,
+};
+
+const int QueenMG[64] =
+{
+    -23, -20, -16, -12, -12, -16, -20, -23,
+    -18, -14, -12,  -8,  -8, -12, -14, -18,
+    -16,  -8,   0,   8,   8,   0,  -8, -16,
+    -8,   0,  12,  16,  16,  12,   0,  -8,
+    4,  12,  16,  23,  23,  16,  12,   4,
+    16,  23,  27,  31,  31,  27,  23,  16,
+    4,  12,  16,  23,  23,  16,  12,   4,
+    2,   8,  12,  12,  12,  12,   8,   2,
+};
+
+const int QueenEG[64] =
+{
+    -23, -20, -16, -12, -12, -16, -20, -23,
+    -18, -14, -12,  -8,  -8, -12, -14, -18,
+    -16,  -8,   0,   8,   8,   0,  -8, -16,
+    -8,   0,  12,  16,  16,  12,   0,  -8,
+    4,  12,  16,  23,  23,  16,  12,   4,
+    16,  23,  27,  31,  31,  27,  23,  16,
+    4,  12,  16,  23,  23,  16,  12,   4,
+    2,   8,  12,  12,  12,  12,   8,   2,
+};
+
+const int KingMG[64] =
+{
+    40,  50,  30,  10,  10,  30,  50,  40,
+    30,  40,  20,   0,   0,  20,  40,  30,
+    10,  20,   0, -20, -20,   0,  20,  10,
+    0,  10, -10, -30, -30, -10,  10,   0,
+    -10,   0, -20, -40, -40, -20,   0, -10,
+    -20, -10, -30, -50, -50, -30, -10, -20,
+    -30, -20, -40, -60, -60, -40, -20, -30,
+    -40, -30, -50, -70, -70, -50, -30, -40 ,
+};
+
+const int KingEG[64] =
+{
+    -34, -30, -28, -27, -27, -28, -30, -34,
+    -17, -13, -11, -10, -10, -11, -13, -17,
+    -2,   2,   4,   5,   5,   4,   2,  -2,
+    11,  15,  17,  18,  18,  17,  15,  11,
+    22,  26,  28,  29,  29,  28,  26,  22,
+    31,  34,  37,  38,  38,  37,  34,  31,
+    38,  41,  44,  45,  45,  44,  41,  38,
+    42,  46,  48,  50,  50,  48,  46,  42,
+};
+
+const int mirror[64] = {
+  56,  57,  58,  59,  60,  61,  62,  63,
+  48,  49,  50,  51,  52,  53,  54,  55,
+  40,  41,  42,  43,  44,  45,  46,  47,
+  32,  33,  34,  35,  36,  37,  38,  39,
+  24,  25,  26,  27,  28,  29,  30,  31,
+  16,  17,  18,  19,  20,  21,  22,  23,
+   8,   9,  10,  11,  12,  13,  14,  15,
+   0,   1,   2,   3,   4,   5,   6,   7
+};
+
+#define MG 0
+#define EG 1
+#define PhaseNb 2
+#define RANK_NB 8
+
+// Definition of evaluation terms related to Passed Pawns
+
+const int PassedPawn[2][2][RANK_NB][PhaseNb] = {
+  {{{   0,   0}, { -33, -30}, { -24,   8}, { -13,  -2}, {  24,   0}, {  66,  -5}, { 160,  32}, {   0,   0}},
+   {{   0,   0}, {  -2,   1}, { -14,  23}, { -15,  35}, {   7,  44}, {  72,  60}, { 194, 129}, {   0,   0}}},
+  {{{   0,   0}, {  -7,  12}, { -12,   6}, { -10,  27}, {  27,  32}, {  86,  63}, { 230, 149}, {   0,   0}},
+   {{   0,   0}, {  -5,   8}, { -12,  17}, { -21,  52}, { -14, 109}, {  28, 202}, { 119, 369}, {   0,   0}}},
+};
+
+const int BishopPair[PhaseNb] = { 46, 64 };
+
+const int Tempo[PhaseNb] = { 5, 7 };
+
+int PawnConnected[2][64] = {
+    { 0, 0, 0, 0, 0, 0, 0, 0,
+      2, 2, 2, 3, 3, 2, 2, 2,
+      4, 4, 5, 6, 6, 5, 4, 4,
+      7, 8,10,12,12,10, 8, 7,
+     11,14,17,21,21,17,14,11,
+     16,21,25,33,33,25,12,16,
+     32,42,50,55,55,50,42,32,
+      0, 0, 0, 0, 0, 0, 0, 0, },
+
+    { 0, 0, 0, 0, 0, 0, 0, 0,
+     32,42,50,55,55,50,42,32,
+     16,21,25,33,33,25,12,16,
+     11,14,17,21,21,17,14,11,
+      7, 8,10,12,12,10, 8, 7,
+      4, 4, 5, 6, 6, 5, 4, 4,
+      2, 2, 2, 3, 3, 2, 2, 2,
+      0, 0, 0, 0, 0, 0, 0, 0, }
+};
+
+#define ColourNb 2
+
+#define WHITE_SQUARES 0x55AA55AA55AA55AA
+#define BLACK_SQUARES 0xAA55AA55AA55AA55
+
+#define KING_HAS_CASTLED     (25)
+#define KING_CAN_CASTLE      (10)
+
+#define ROOK_OPEN_FILE_MID   (35)
+#define ROOK_OPEN_FILE_END   (20)
+#define ROOK_SEMI_FILE_MID   (12)
+#define ROOK_SEMI_FILE_END   (12)
+#define ROOK_ON_7TH_MID      (10)
+#define ROOK_ON_7TH_END      (15)
+
+#define PAWN_STACKED_MID     (10)
+#define PAWN_STACKED_END     (20)
+#define PAWN_ISOLATED_MID    (10)
+#define PAWN_ISOLATED_END    (20)
+
+#define FILE_NB 8
+
+U64 pawnAdvance(U64 pawns, U64 occupied, int colour) {
+    return ~occupied & (colour == WHITE ? (pawns << 8) : (pawns >> 8));
 }
 
-#define ENDGAME_MAT (1 * PieceVal[R] + 2 * PieceVal[N] + 2 * PieceVal[P] + PieceVal[K])
+static inline int fileOf(int square) {
+    return square & 7;
+}
 
-int EvalPosition(const S_BOARD* pos) {
+static inline int rankOf(int square) {
+    return square >> 3;
+}
 
-    int pce;
-    int pceNum;
-    int sq;
-    int score = pos->material[WHITE] - pos->material[BLACK];
+#define kingAttacks(sq, tg) (KingMap[(sq)] & (tg))
 
-    if (!pos->pceNum[P] && !pos->pceNum[p] && MaterialDraw(pos) == TRUE) {
-        return 0;
-    }
+#define File(sq) ((sq) & 7)
+#define Rank(sq) ((sq) >> 3)
 
-    pce = P;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        score += PawnTable[sq];
+int pieceValues[5][2] = {
+    {100, 120}, {400, 380}, {420, 400}, {650, 600}, {1350, 1270}
+};
 
+int Evalpos(S_BOARD* pos) {
 
-        if ((IsolatedMask[sq] & pos->pawns[WHITE]) == 0) {
-            score += PawnIsolated;
+    U64 white = pos->ColorBB[0];
+    U64 black = pos->ColorBB[1];
+    U64 pawns = (pos->PieceBB[P] | pos->PieceBB[p]);
+    U64 knights = (pos->PieceBB[N] | pos->PieceBB[n]);
+    U64 bishops = (pos->PieceBB[B] | pos->PieceBB[b]);
+    U64 rooks = (pos->PieceBB[R] | pos->PieceBB[r]);
+    U64 queens = (pos->PieceBB[Q] | pos->PieceBB[q]);
+    U64 kings = (pos->PieceBB[K] | pos->PieceBB[k]);
+
+    U64 myPieces, myPawns, enemyPawns, passedPawns = 0ULL;
+    U64 tempPawns, tempKnights, tempBishops, tempRooks, tempQueens;
+    U64 occupiedMinusMyBishops, occupiedMinusMyRooks;
+    U64 attacks, mobilityArea, destination, defenders;
+
+    int mg = 0, eg = 0;
+    //int pawnmg = 0, pawneg = 0;
+    int eval, curPhase;
+    int mobiltyCount, defended;
+    int colour, bit, semi, rank;
+    int count, canAdvance, safeAdvance;
+
+    U64 whiteKingBitboard = (pos->PieceBB[K]);
+    int wKingSq = PopBit(&whiteKingBitboard);
+    U64 blackKingBitboard = (pos->PieceBB[k]);
+    int bKingSq = PopBit(&blackKingBitboard);
+
+    mg += KingMG[wKingSq];
+    eg += KingEG[wKingSq];
+
+    mg -= KingMG[mirror[bKingSq]];
+    eg -= KingEG[mirror[bKingSq]];
+
+    U64 whitePawns = white & pawns;
+    U64 blackPawns = black & pawns;
+    U64 notEmpty = white | black;
+
+    U64 pawnAttacks[ColourNb] = {
+        (whitePawns << 9 & ~FILEA) | (whitePawns << 7 & ~FILEH),
+        (blackPawns >> 9 & ~FILEH) | (blackPawns >> 7 & ~FILEA)
+    };
+
+    U64 kingAreas[ColourNb] = {
+        KingMap[wKingSq] | (1ULL << wKingSq) | (KingMap[wKingSq] << 8),
+        KingMap[bKingSq] | (1ULL << bKingSq) | (KingMap[bKingSq] >> 8)
+    };
+
+    U64 allAttackBoards[ColourNb];
+    U64 attackedNoQueen[ColourNb];
+
+    allAttackBoards[WHITE] = kingAttacks(wKingSq, ~0ULL);
+    allAttackBoards[BLACK] = kingAttacks(bKingSq, ~0ULL);
+
+    for (colour = BLACK; colour >= WHITE; colour--) {
+
+        // Negate the scores so that the scores are from
+        // White's perspective after the loop completes
+        mg = -mg;
+        eg = -eg;
+
+        myPieces = pos->ColorBB[colour];
+        myPawns = myPieces & pawns;
+        enemyPawns = pawns ^ myPawns;
+
+        tempPawns = myPawns;
+        tempKnights = myPieces & knights;
+        tempBishops = myPieces & bishops;
+        tempRooks = myPieces & rooks;
+        tempQueens = myPieces & queens;
+
+        occupiedMinusMyBishops = notEmpty ^ (myPieces & (bishops | queens));
+        occupiedMinusMyRooks = notEmpty ^ (myPieces & (rooks | queens));
+
+        if ((tempBishops & WHITE_SQUARES) && (tempBishops & BLACK_SQUARES)) {
+            mg += BishopPair[MG];
+            eg += BishopPair[EG];
         }
 
-        if ((WhitePassedMask[sq] & pos->pawns[BLACK]) == 0) {
-            score += PawnPassed[RanksBrd[sq]];
+        else if (pos->castlePerm & (3 << (2 * colour))) {
+            mg += KING_CAN_CASTLE;
+            eg += KING_CAN_CASTLE;
         }
 
-    }
+        // Get the attack board for the pawns
+        attacks = pawnAttacks[colour] & kingAreas[!colour];
+        allAttackBoards[colour] |= pawnAttacks[colour];
 
-    pce = p;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        score -= PawnTable[MIRROR64(sq)];
+        const int forward = (colour == WHITE) ? 8 : -8;
 
-        if ((IsolatedMask[sq] & pos->pawns[BLACK]) == 0) {
-            score -= PawnIsolated;
+        while (tempPawns) {
+
+            int bit = PopBit(&tempPawns);
+
+            if (colour == WHITE)
+            {
+                mg += PawnMG[bit];
+                eg += PawnEG[bit];
+            }
+            else
+            {
+                mg += PawnMG[mirror[bit]];
+                eg += PawnEG[mirror[bit]];
+            }
+
+            // Save the fact that this pawn is passed. We will
+            // use it later in order to apply a proper bonus
+            if (!(PassedPawnMasks[colour][bit] & enemyPawns))
+                passedPawns |= (1ULL << bit);
+
+            if (!(IsolatedPawnMasks[bit] & tempPawns)) {
+                mg -= PAWN_ISOLATED_MID;
+                eg -= PAWN_ISOLATED_END;
+            }
+
+            if (FILES[File(bit)] & tempPawns) {
+                mg -= PAWN_STACKED_MID;
+                eg -= PAWN_STACKED_END;
+            }
+
         }
 
-        if ((BlackPassedMask[sq] & pos->pawns[WHITE]) == 0) {
-            score -= PawnPassed[7 - RanksBrd[sq]];
+        while (tempKnights) {
+
+            int bit = PopBit(&tempKnights);
+
+            if (colour == WHITE)
+            {
+                mg += KnightMG[bit];
+                eg += KnightEG[bit];
+            }
+            else
+            {
+                mg += KnightMG[mirror[bit]];
+                eg += KnightEG[mirror[bit]];
+            }
+
+            attacks = KnightAttacks[bit];
+            allAttackBoards[colour] |= attacks;
+        }
+
+        while (tempBishops) {
+
+            int bit = PopBit(&tempBishops);
+
+            if (colour == WHITE)
+            {
+                mg += BishopMG[bit];
+                eg += BishopEG[bit];
+            }
+            else
+            {
+                mg += BishopMG[mirror[bit]];
+                eg += BishopEG[mirror[bit]];
+            }
+
+            attacks = BishopAttacks(pos, bit);
+            allAttackBoards[colour] |= attacks;
+        }
+
+
+        while (tempRooks) {
+
+            int bit = PopBit(&tempRooks);
+
+            if (colour == WHITE)
+            {
+                mg += RookMG[bit];
+                eg += RookEG[bit];
+            }
+            else
+            {
+                mg += RookMG[mirror[bit]];
+                eg += RookEG[mirror[bit]];
+            }
+
+            attacks = RookAttacks(pos, bit);
+            allAttackBoards[colour] |= attacks;
+
+            // Rook is on a semi-open file if there are no
+            // pawns of the Rook's colour on the file. If
+            // there are no pawns at all, it is an open file
+            if (!(myPawns & FILES[File(bit)])) {
+
+                if (!(enemyPawns & FILES[File(bit)])) {
+                    mg += ROOK_OPEN_FILE_MID;
+                    eg += ROOK_OPEN_FILE_END;
+                }
+
+                else {
+                    mg += ROOK_SEMI_FILE_MID;
+                    eg += ROOK_SEMI_FILE_END;
+                }
+            }
+
+            // Rook gains a bonus for being located
+            // on seventh rank relative to its colour
+            if (Rank(bit) == (colour == BLACK ? 1 : 6)) {
+                mg += ROOK_ON_7TH_MID;
+                eg += ROOK_ON_7TH_END;
+            }
+        }
+
+
+        while (tempQueens) {
+
+            int bit = PopBit(&tempQueens);
+
+            if (colour == WHITE)
+            {
+                mg += QueenMG[bit];
+                eg += QueenEG[bit];
+            }
+            else
+            {
+                mg += QueenMG[mirror[bit]];
+                eg += QueenEG[mirror[bit]];
+            }
+
+            attacks = (RookAttacks(pos, bit) | BishopAttacks(pos, bit));
+            allAttackBoards[colour] |= attacks;
         }
     }
 
-    pce = N;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        score += KnightTable[sq];
-    }
+    // Evaluate the passed pawns for both colours
+    for (colour = BLACK; colour >= WHITE; colour--) {
 
-    pce = n;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        score -= KnightTable[MIRROR64(sq)];
-    }
+        // Negate the scores so that the scores are from
+        // White's perspective after the loop completes
+        mg = -mg; eg = -eg;
 
-    pce = B;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        score += BishopTable[sq];
-    }
+        tempPawns = pos->ColorBB[colour] & passedPawns;
 
-    pce = b;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        score -= BishopTable[MIRROR64(sq)];
-    }
+        while (tempPawns) {
 
-    pce = R;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        score += RookTable[sq];
-        if (!(pos->pawns[BOTH] & FileBBMask[FilesBrd[sq]])) {
-            score += RookOpenFile;
-        }
-        else if (!(pos->pawns[WHITE] & FileBBMask[FilesBrd[sq]])) {
-            score += RookSemiOpenFile;
+            // Pop off the next Passed Pawn
+            bit = PopBit(&tempPawns);
+
+            // Determine the releative  rank
+            rank = (colour == BLACK) ? (7 - Rank(bit)) : Rank(bit);
+
+            // Determine where we would advance to
+            destination = (colour == BLACK)
+                ? ((1ULL << bit) >> 8)
+                : ((1ULL << bit) << 8);
+
+            canAdvance = (destination & notEmpty) == 0ULL;
+            safeAdvance = !(destination & allAttackBoards[!colour]);
+
+            mg += PassedPawn[canAdvance][safeAdvance][rank][MG];;
+            eg += PassedPawn[canAdvance][safeAdvance][rank][EG];
         }
     }
 
-    pce = r;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        score -= RookTable[MIRROR64(sq)];
-        if (!(pos->pawns[BOTH] & FileBBMask[FilesBrd[sq]])) {
-            score -= RookOpenFile;
-        }
-        else if (!(pos->pawns[BLACK] & FileBBMask[FilesBrd[sq]])) {
-            score -= RookSemiOpenFile;
-        }
-    }
+    mg += (pos->side == WHITE) ? Tempo[MG] : -Tempo[MG];
+    eg += (pos->side == WHITE) ? Tempo[EG] : -Tempo[EG];
 
-    pce = Q;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        if (!(pos->pawns[BOTH] & FileBBMask[FilesBrd[sq]])) {
-            score += QueenOpenFile;
-        }
-        else if (!(pos->pawns[WHITE] & FileBBMask[FilesBrd[sq]])) {
-            score += QueenSemiOpenFile;
-        }
-    }
+    int evalpiecesMG, evalpiecesEG;
+    evalpiecesMG = (bitCount(pos->PieceBB[P]) - bitCount(pos->PieceBB[p])) * pieceValues[0][0];
+    evalpiecesMG += (bitCount(pos->PieceBB[R]) - bitCount(pos->PieceBB[r])) * pieceValues[3][0];
+    evalpiecesMG += (bitCount(pos->PieceBB[N]) - bitCount(pos->PieceBB[n])) * pieceValues[1][0];
+    evalpiecesMG += (bitCount(pos->PieceBB[B]) - bitCount(pos->PieceBB[b])) * pieceValues[2][0];
+    evalpiecesMG += (bitCount(pos->PieceBB[Q]) - bitCount(pos->PieceBB[q])) * pieceValues[4][0];
 
-    pce = q;
-    for (pceNum = 0; pceNum < pos->pceNum[pce]; ++pceNum) {
-        sq = pos->pList[pce][pceNum];
-        if (!(pos->pawns[BOTH] & FileBBMask[FilesBrd[sq]])) {
-            score -= QueenOpenFile;
-        }
-        else if (!(pos->pawns[BLACK] & FileBBMask[FilesBrd[sq]])) {
-            score -= QueenSemiOpenFile;
-        }
-    }
-    
-    pce = K;
-    sq = pos->pList[pce][0];
+    evalpiecesEG = (bitCount(pos->PieceBB[P]) - bitCount(pos->PieceBB[p])) * pieceValues[0][1];
+    evalpiecesEG += (bitCount(pos->PieceBB[R]) - bitCount(pos->PieceBB[r])) * pieceValues[3][1];
+    evalpiecesEG += (bitCount(pos->PieceBB[N]) - bitCount(pos->PieceBB[n])) * pieceValues[1][1];
+    evalpiecesEG += (bitCount(pos->PieceBB[B]) - bitCount(pos->PieceBB[b])) * pieceValues[2][1];
+    evalpiecesEG += (bitCount(pos->PieceBB[Q]) - bitCount(pos->PieceBB[q])) * pieceValues[4][1];
 
-    if ((pos->material[BLACK] <= ENDGAME_MAT)) {
-        score += KingE[sq];
-    }
-    else {
-        score += KingO[sq];
-    }
+    mg = mg + evalpiecesMG;
+    eg = eg + evalpiecesEG;
 
-    pce = k;
-    sq = pos->pList[pce][0];
+    curPhase = 24 - (bitCount(knights | bishops))
+        - (bitCount(rooks) << 1)
+        - (bitCount(queens) << 2);
 
-    if ((pos->material[WHITE] <= ENDGAME_MAT)) {
-        score -= KingE[MIRROR64(sq)];
-    }
-    else {
-        score -= KingO[MIRROR64(sq)];
-    }
+    curPhase = (curPhase * 256 + 12) / 24;
 
-    if (pos->pceNum[B] >= 2) score += BishopPair;
-    if (pos->pceNum[b] >= 2) score -= BishopPair;
+    eval = ((mg * (256 - curPhase)) + (eg * curPhase)) / 256;
 
-    if (pos->side == WHITE) {
-        return score;
-    }
-    else {
-        return -score;
-    }
+    return pos->side == WHITE ? eval : -eval;
 }
 
 // hashkeys.c
@@ -2243,63 +2682,6 @@ void PerftTest(int depth, S_BOARD* pos) {
     return;
 }
 
-// validate
-
-int SideValid(const int side) {
-    return (side == WHITE || side == BLACK) ? 1 : 0;
-}
-
-int FileRankValid(const int fr) {
-    return (fr >= 0 && fr <= 7) ? 1 : 0;
-}
-
-int PieceValidEmpty(const int pce) {
-    return (pce >= e && pce <= k) ? 1 : 0;
-}
-
-int PieceValid(const int pce) {
-    return (pce >= P && pce <= k) ? 1 : 0;
-}
-
-
-void MirrorEvalTest(S_BOARD* pos) {
-    FILE* file;
-    file = fopen("mirror.epd", "r");
-    char lineIn[1024];
-    int ev1 = 0; int ev2 = 0;
-    int positions = 0;
-    if (file == NULL) {
-        printf("File Not Found\n");
-        return;
-    }
-    else {
-        while (fgets(lineIn, 1024, file) != NULL) {
-            ParseFen(lineIn, pos);
-            positions++;
-            ev1 = EvalPosition(pos);
-            MirrorBoard(pos);
-            ev2 = EvalPosition(pos);
-
-            if (ev1 != ev2) {
-                printf("\n\n\n");
-                ParseFen(lineIn, pos);
-                PrintBoard(pos);
-                MirrorBoard(pos);
-                PrintBoard(pos);
-                printf("\n\nMirror Fail:\n%s\n", lineIn);
-                getchar();
-                return;
-            }
-
-            if ((positions % 1000) == 0) {
-                printf("position %d\n", positions);
-            }
-
-            memset(&lineIn[0], 0, sizeof(lineIn));
-        }
-    }
-}
-
 //search
 
 #define infinite 30000
@@ -2385,10 +2767,10 @@ static int Quiescence(int alpha, int beta, S_BOARD* pos, S_SEARCHINFO* info) {
     }
 
     if (pos->ply > MAXDEPTH - 1) {
-        return EvalPosition(pos);
+        return Evalpos(pos);
     }
 
-    int Score = EvalPosition(pos);
+    int Score = Evalpos(pos);
 
     if (Score >= beta) {
         return beta;
@@ -2470,10 +2852,10 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
     }
 
     if (pos->ply > MAXDEPTH - 1) {
-        return EvalPosition(pos);
+        return Evalpos(pos);
     }
 
-    int InCheck = SqAttacked(pos->KingSq[pos->side], pos->side ^ 1, pos);
+    int InCheck = UnderCheck(pos, pos->side);
 
     if (InCheck == TRUE) {
         depth++;
@@ -2775,28 +3157,18 @@ int main() {
 
         S_BOARD pos[1];
         S_SEARCHINFO info[1];
-        info->quit = FALSE;
-        pos->PvTable->pTable = NULL;
-        InitPvTable(pos->PvTable);
 
         //Perft results depth 3 - 8902, depth 4 - 197,281, depth 5 - 4,865,609, depth 6 - 119,060,324
 
-        //En passant sq should be 16 not 40
-        //ParseFen("rnbqkbnr/1ppppppp/8/p7/7P/8/PPPPPPP1/RNBQKBNR w KQkq a6 0 2", pos);
-        //ParseFen("rnbqk1nr/pppp1ppp/4p3/8/8/b1P5/PPQPPPPP/RNBK1BNR b KQkq - 0 3", pos);
-        // 119060076
-        //ParseFen(START_FEN, pos);
-        //193690690 -depth 5:
+        ParseFen(START_FEN, pos);
+        printf("eval %d\n", Evalpos(pos));
+        //depth 5 - 193690690
         //ParseFen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -", pos);
-        //178633661 depth 7:
-        //ParseFen("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - -", pos);
-        //706045033 depth 6:
-        //ParseFen("r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1", pos);
-        //89941194 depth 5:
-        //ParseFen("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", pos);
-        //164,075,551 depth 5:
-        ParseFen("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", pos);
-        PerftTest(6, pos);
+        //PerftTest(5, pos);
+
+        //ParseFen("r3kb1r/1bpq1ppp/ppn1p3/8/3PP3/P1BB1N2/1P3PPP/R2QK2R w KQkq - 2 11", pos);
+        //PerftTest(1, pos);
+        
         while (1);
     }
     else
