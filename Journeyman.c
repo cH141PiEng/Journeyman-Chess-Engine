@@ -4,17 +4,17 @@
 #include <windows.h>
 //#include <unistd.h> //needed for compiling with gcc, but does not work on VS 2019
 
-//Journeyman 1.3
+//Journeyman 1.4
 //Uses _BitScanForward64, __popcnt64
-//Modified version of the Video Instruction Chess Engine video #84
+//Modified version of the Video Instruction Chess Engine video #87
 //Instead of a 120 array board, uses bitboards
 //Increased history table ~128 MB
 //Tapered evaluation
-//Evaluates more simple aspects of the position as in Ethereal
+//Evaluates more aspects of the position
 
 typedef unsigned long long U64;
 
-#define NAME "Journeyman 1.3"
+#define NAME "Journeyman 1.4"
 #define BRD_SQ_NUM 64
 
 #define MAXGAMEMOVES 2048//Max # of half moves expected in a game
@@ -23,6 +23,9 @@ typedef unsigned long long U64;
 #define MAXDEPTH 64
 
 #define START_FEN  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+#define infinite 30000
+#define ISMATE (infinite - MAXDEPTH)
 
 //Numbers for not a piece and the pieces:
 enum { e = 0, P, N, B, R, Q, K, p, n, b, r, q, k };
@@ -75,24 +78,24 @@ typedef struct {
     int count;//count of # of moves in the move list
 } S_MOVELIST;
 
-//the pvtable is represented using two structures
+enum { HFNONE, HFALPHA, HFBETA, HFEXACT };
 
-//A structure used as hashing element it has a posKey and a best move to be hashed for that posKey
-//The table structure which has the array of above structure
-
-
-//The entries which will be present in the PVTABLE...it is a pair of the posKey and the 
-//move which will be stored in the principal variation table 
 typedef struct {
     U64 posKey;
     int move;
-} S_PVENTRY;
+    int score;
+    int depth;
+    int flags;
+} S_HASHENTRY;
 
-//The actual PVTABLE structure which stores the entries array
 typedef struct {
-    S_PVENTRY* pTable;
+    S_HASHENTRY* pTable;
     int numEntries;
-} S_PVTABLE;
+    int newWrite;
+    int overWrite;
+    int hit;
+    int cut;
+} S_HASHTABLE;
 
 //To undo any move if we want to go back to a previous stage of the game 
 typedef struct {
@@ -131,7 +134,7 @@ typedef struct {
     //structure and also it helps to check if a move is repeated or not. Can do so by using the 
     //hisPly as the index and going back to all the states and see if the posKey is repeated or not
 
-    S_PVTABLE PvTable[1];//Keep one PvTable in the main structure for the current board position...in the form of 
+    S_HASHTABLE HashTable[1];//Keep one HashTable in the main structure for the current board position...in the form of 
                          // a pointer which is already given memory.
     int PvArray[MAXDEPTH];//Stores the best line of moves up to certain depth for the given position
 
@@ -157,6 +160,7 @@ typedef struct {
 
     float fh;
     float fhf;
+    int nullCut;
 
 } S_SEARCHINFO;
 
@@ -431,7 +435,6 @@ void initalizeMasks() {
         }
     }
 
-    // Initalize relative outpost ranks
     OutpostRanks[WHITE] = RANK4 | RANK5 | RANK6;
     OutpostRanks[BLACK] = RANK3 | RANK4 | RANK5;
 }
@@ -843,8 +846,8 @@ static void ClearPiece(const int sq, S_BOARD* pos) {
 
     if (PieceBig[pce]) {
         pos->bigPce[col]--;
-        
     }
+
 }
 
 static void AddPiece(const int sq, S_BOARD* pos, const int pce) {
@@ -1074,11 +1077,6 @@ void TakeNullMove(S_BOARD* pos) {
 }
 
 // attack
-
-const int KnDir[8] = { -6, -17,	-15, -10, 6, 17, 15, 10 };
-const int RkDir[4] = { -1, -8,	1, 8 };
-const int BiDir[4] = { -7, -9, 7, 9 };
-const int KiDir[8] = { -1, -8,	1, 8, -7, -9, 7, 9 };
 
 // is square attacked by side? - needed in particular to check if king is in check or squares
 // in between king and rook to castle with are attacked by any piece of opposite color.
@@ -2036,12 +2034,12 @@ void PrintMoveList(const S_MOVELIST* list) {
 
 // pvtable
 
-int ProbePvTable(const S_BOARD* pos);
+int ProbePvMove(const S_BOARD* pos);
 
 //Get the best pvline stored in the PvArray for a given depth but we may also get a result greater than the depth
 int GetPvLine(const int depth, S_BOARD* pos) {
 
-    int move = ProbePvTable(pos);
+    int move = ProbePvMove(pos);
     int count = 0;
 
     while (move != NOMOVE && count < depth) {
@@ -2053,7 +2051,7 @@ int GetPvLine(const int depth, S_BOARD* pos) {
         else {
             break;
         }
-        move = ProbePvTable(pos);
+        move = ProbePvMove(pos);
     }
 
     while (pos->ply > 0) {
@@ -2064,46 +2062,106 @@ int GetPvLine(const int depth, S_BOARD* pos) {
 
 }
 
-const int PvSize = 0x100000 * 128;
+void ClearHashTable(S_HASHTABLE* table) {
 
-//This function is used to reset the Pvtable by setting everything to 0 and the clear the pvtable for use before the next search is applied
-void ClearPvTable(S_PVTABLE* table) {
+    S_HASHENTRY* tableEntry;
 
-    S_PVENTRY* pvEntry;
-
-    for (pvEntry = table->pTable; pvEntry < table->pTable + table->numEntries; pvEntry++) {
-        pvEntry->posKey = 0ULL;
-        pvEntry->move = NOMOVE;
+    for (tableEntry = table->pTable; tableEntry < table->pTable + table->numEntries; tableEntry++) {
+        tableEntry->posKey = 0ULL;
+        tableEntry->move = NOMOVE;
+        tableEntry->depth = 0;
+        tableEntry->score = 0;
+        tableEntry->flags = 0;
     }
+    table->newWrite = 0;
 }
 
-//This function is for initialising the count
-void InitPvTable(S_PVTABLE* table) {
+void InitHashTable(S_HASHTABLE* table, const int MB) {
 
-    table->numEntries = PvSize / sizeof(S_PVENTRY);
+    int HashSize = 0x100000 * MB;
+    table->numEntries = HashSize / sizeof(S_HASHENTRY);
     table->numEntries -= 2;
-    if (table->pTable != NULL) free(table->pTable);
-    table->pTable = (S_PVENTRY*)malloc(table->numEntries * sizeof(S_PVENTRY));
-    ClearPvTable(table);
-    printf("PvTable init complete with %d entries\n", table->numEntries);
+
+    if (table->pTable != NULL) {
+        free(table->pTable);
+    }
+
+    table->pTable = (S_HASHENTRY*)malloc(table->numEntries * sizeof(S_HASHENTRY));
+    if (table->pTable == NULL) {
+        printf("Hash Allocation Failed, trying %dMB...\n", MB / 2);
+        InitHashTable(table, MB / 2);
+    }
+    else {
+        ClearHashTable(table);
+        printf("HashTable init complete with %d entries\n", table->numEntries);
+    }
 
 }
 
-//To store a move in the pvtable using hashing function as poskey%count
-void StorePvMove(const S_BOARD* pos, const int move) {
+int ProbeHashEntry(S_BOARD* pos, int* move, int* score, int alpha, int beta, int depth) {
 
-    int index = pos->posKey % pos->PvTable->numEntries;
+    int index = pos->posKey % pos->HashTable->numEntries;
 
-    pos->PvTable->pTable[index].move = move;
-    pos->PvTable->pTable[index].posKey = pos->posKey;
+    if (pos->HashTable->pTable[index].posKey == pos->posKey) {
+        *move = pos->HashTable->pTable[index].move;
+        if (pos->HashTable->pTable[index].depth >= depth) {
+            pos->HashTable->hit++;
+
+            *score = pos->HashTable->pTable[index].score;
+            if (*score > ISMATE) *score -= pos->ply;
+            else if (*score < -ISMATE) *score += pos->ply;
+
+            switch (pos->HashTable->pTable[index].flags) {
+
+            case HFALPHA: if (*score <= alpha) {
+                *score = alpha;
+                return TRUE;
+            }
+                        break;
+            case HFBETA: if (*score >= beta) {
+                *score = beta;
+                return TRUE;
+            }
+                       break;
+            case HFEXACT:
+                return TRUE;
+                break;
+            //default: ASSERT(FALSE); break;
+            default: break;
+            }
+        }
+    }
+
+    return FALSE;
 }
 
-int ProbePvTable(const S_BOARD* pos) {
+void StoreHashEntry(S_BOARD* pos, const int move, int score, const int flags, const int depth) {
 
-    int index = pos->posKey % pos->PvTable->numEntries;
+    int index = pos->posKey % pos->HashTable->numEntries;
 
-    if (pos->PvTable->pTable[index].posKey == pos->posKey) {
-        return pos->PvTable->pTable[index].move;
+    if (pos->HashTable->pTable[index].posKey == 0) {
+        pos->HashTable->newWrite++;
+    }
+    else {
+        pos->HashTable->overWrite++;
+    }
+
+    if (score > ISMATE) score += pos->ply;
+    else if (score < -ISMATE) score -= pos->ply;
+
+    pos->HashTable->pTable[index].move = move;
+    pos->HashTable->pTable[index].posKey = pos->posKey;
+    pos->HashTable->pTable[index].flags = flags;
+    pos->HashTable->pTable[index].score = score;
+    pos->HashTable->pTable[index].depth = depth;
+}
+
+int ProbePvMove(const S_BOARD* pos) {
+
+    int index = pos->posKey % pos->HashTable->numEntries;
+
+    if (pos->HashTable->pTable[index].posKey == pos->posKey) {
+        return pos->HashTable->pTable[index].move;
     }
 
     return NOMOVE;
@@ -2132,7 +2190,7 @@ const int PawnEG[64] =
     -1,   0,   4,   7,   7,   4,   0,  -1,
     1,   2,   7,  11,  11,   7,   2,   1,
     5,  11,  13,  14,  14,  13,  11,   5,
-    0,   1,   3,   5,   5,   3,   1,   0,    // Pawns 7 Rank
+    0,   1,   3,   5,   5,   3,   1,   0,
     0,   0,   0,   0,   0,   0,   0,   0
 };
 
@@ -2316,6 +2374,8 @@ int SafetyTable[100] = { // Taken from CPW / Stockfish
  500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
  500, 500, 500, 500, 500, 500, 500, 500, 500, 500
 };
+
+#define ColourNb 2
 
 #define WHITE_SQUARES 0x55AA55AA55AA55AA
 #define BLACK_SQUARES 0xAA55AA55AA55AA55
@@ -2654,7 +2714,6 @@ int Evalpos(S_BOARD* pos) {
             attacks = (RookAttacks(pos, bit) | BishopAttacks(pos, bit));
             allAttackBoards[color] |= attacks;
 
-            // Get the attack counts for this Queen
             attacks = attacks & kingAreas[!color];
             if (attacks) {
                 attackCounts[color] += 4 * bitCount(attacks);
@@ -2884,13 +2943,10 @@ void PerftTest(int depth, S_BOARD* pos) {
 
 //search
 
-#define infinite 30000
-#define ISMATE (infinite - MAXDEPTH)
-
 int rootDepth;
 
 static void CheckUp(S_SEARCHINFO* info) {
-    // Check if time up or interrupt from GUI
+    // .. check if time up, or interrupt from GUI
     if (info->timeset == TRUE && GetTimeMs() > info->stoptime) {
         info->stopped = TRUE;
     }
@@ -2945,13 +3001,39 @@ static void ClearForSearch(S_BOARD* pos, S_SEARCHINFO* info) {
         }
     }
 
-    ClearPvTable(pos->PvTable);
+    pos->HashTable->overWrite = 0;
+    pos->HashTable->hit = 0;
+    pos->HashTable->cut = 0;
     pos->ply = 0;
 
     info->stopped = 0;
     info->nodes = 0;
     info->fh = 0;
     info->fhf = 0;
+}
+
+int MAX(int num1, int num2)
+{
+    if (num1 > num2)
+    {
+        return num1;
+    }
+    else
+    {
+        return num2;
+    }
+}
+
+int MIN(int num1, int num2)
+{
+    if (num1 > num2)
+    {
+        return num2;
+    }
+    else
+    {
+        return num1;
+    }
 }
 
 static int Quiescence(int alpha, int beta, S_BOARD* pos, S_SEARCHINFO* info) {
@@ -2970,6 +3052,13 @@ static int Quiescence(int alpha, int beta, S_BOARD* pos, S_SEARCHINFO* info) {
         return Evalpos(pos);
     }
 
+    // Mate Distance Pruning
+    alpha = MAX(alpha, -infinite + pos->ply);
+    beta = MIN(beta, infinite - pos->ply);
+    if (alpha >= beta) {
+        return alpha;
+    }
+
     int Score = Evalpos(pos);
 
     if (Score >= beta) {
@@ -2985,19 +3074,7 @@ static int Quiescence(int alpha, int beta, S_BOARD* pos, S_SEARCHINFO* info) {
 
     int MoveNum = 0;
     int Legal = 0;
-    int OldAlpha = alpha;
-    int BestMove = NOMOVE;
     Score = -infinite;
-    int PvMove = ProbePvTable(pos);
-
-    if (PvMove != NOMOVE) {
-        for (MoveNum = 0; MoveNum < list->count; ++MoveNum) {
-            if (list->moves[MoveNum].move == PvMove) {
-                list->moves[MoveNum].score = 2000000;
-                break;
-            }
-        }
-    }
 
     for (MoveNum = 0; MoveNum < list->count; ++MoveNum) {
 
@@ -3024,12 +3101,7 @@ static int Quiescence(int alpha, int beta, S_BOARD* pos, S_SEARCHINFO* info) {
                 return beta;
             }
             alpha = Score;
-            BestMove = list->moves[MoveNum].move;
         }
-    }
-
-    if (alpha != OldAlpha) {
-        StorePvMove(pos, BestMove);
     }
 
     return alpha;
@@ -3061,8 +3133,18 @@ int BigPiecesExist(S_BOARD* pos, int side)
     }
 }
 
+// Null Move Pruning Values
+static const int RR = 2;
+static const int minDepth = 3;
+
 static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO* info, int doNull) {
 
+    int InCheck = UnderCheck(pos, pos->side);
+
+    if (InCheck == TRUE) {
+        depth++;
+    }
+    
     if (depth == 0) {
         return Quiescence(alpha, beta, pos, info);
     }
@@ -3081,24 +3163,35 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
         return Evalpos(pos);
     }
 
-    int InCheck = UnderCheck(pos, pos->side);
-
-    if (InCheck == TRUE) {
-        depth++;
+    // Mate Distance Pruning (finds shorter mates)
+    alpha = MAX(alpha, -infinite + pos->ply);
+    beta = MIN(beta, infinite - pos->ply);
+    if (alpha >= beta) {
+        return alpha;
     }
 
     int Score = -infinite;
 
+    int PvMove = NOMOVE;
+
+    if (ProbeHashEntry(pos, &PvMove, &Score, alpha, beta, depth) !=0) {
+        pos->HashTable->cut++;
+        return Score;
+    }
+
+    const int positionEval = Evalpos(pos);
+
     // Null Move Pruning
-    if (doNull && !InCheck && pos->ply && (pos->bigPce[pos->side] > 0) && depth >= 4) {
+    if (depth >= minDepth && doNull && !InCheck && pos->ply && (BigPiecesExist(pos, pos->side)) && positionEval >= beta) {
         MakeNullMove(pos);
-        Score = -AlphaBeta(-beta, -beta + 1, depth - 4, pos, info, 0);
+        Score = -AlphaBeta(-beta, -beta + 1, depth - 1 - RR, pos, info, 0);
         TakeNullMove(pos);
         if (info->stopped == 1) {
             return 0;
         }
 
         if (Score >= beta && abs(Score) < ISMATE) {
+            info->nullCut++;
             return beta;
         }
     }
@@ -3110,7 +3203,9 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
     int Legal = 0;
     int OldAlpha = alpha;
     int BestMove = NOMOVE;
-    int PvMove = ProbePvTable(pos);
+
+    int BestScore = -infinite;
+
     Score = -infinite;
 
     if (PvMove != NOMOVE) {
@@ -3140,24 +3235,30 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
             return 0;
         }
 
-        if (Score > alpha) {
-            if (Score >= beta) {
-                if (Legal == 1) {
-                    info->fhf++;
+        if (Score > BestScore) {
+            BestScore = Score;
+            BestMove = list->moves[MoveNum].move;
+            if (Score > alpha) {
+                if (Score >= beta) {
+                    if (Legal == 1) {
+                        info->fhf++;
+                    }
+                    info->fh++;
+
+                    if (!(list->moves[MoveNum].move & MFLAGCAP)) {
+                        pos->searchKillers[1][pos->ply] = pos->searchKillers[0][pos->ply];
+                        pos->searchKillers[0][pos->ply] = list->moves[MoveNum].move;
+                    }
+
+                    StoreHashEntry(pos, BestMove, beta, HFBETA, depth);
+
+                    return beta;
                 }
-                info->fh++;
+                alpha = Score;
 
                 if (!(list->moves[MoveNum].move & MFLAGCAP)) {
-                    pos->searchKillers[1][pos->ply] = pos->searchKillers[0][pos->ply];
-                    pos->searchKillers[0][pos->ply] = list->moves[MoveNum].move;
+                    pos->searchHistory[pos->pieces[FROMSQ(BestMove)]][TOSQ(BestMove)] += depth;
                 }
-
-                return beta;
-            }
-            alpha = Score;
-            BestMove = list->moves[MoveNum].move;
-            if (!(list->moves[MoveNum].move & MFLAGCAP)) {
-                pos->searchHistory[pos->pieces[FROMSQ(BestMove)]][TOSQ(BestMove)] += depth;
             }
         }
     }
@@ -3172,7 +3273,10 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
     }
 
     if (alpha != OldAlpha) {
-        StorePvMove(pos, BestMove);
+        StoreHashEntry(pos, BestMove, BestScore, HFEXACT, depth);
+    }
+    else {
+        StoreHashEntry(pos, BestMove, alpha, HFALPHA, depth);
     }
 
     return alpha;
@@ -3200,7 +3304,6 @@ void SearchPosition(S_BOARD* pos, S_SEARCHINFO* info) {
 
     ClearForSearch(pos, info);
 
-    // iterative deepening
     for (currentDepth = 1; currentDepth <= info->depth; ++currentDepth) {
                             // alpha	 beta
         rootDepth = currentDepth;
@@ -3418,8 +3521,8 @@ int main() {
         S_BOARD pos[1];
         S_SEARCHINFO info[1];
         info->quit = FALSE;
-        pos->PvTable->pTable = NULL;
-        InitPvTable(pos->PvTable);
+        pos->HashTable->pTable = NULL;
+        InitHashTable(pos->HashTable, 128);
         setbuf(stdin, NULL);
         setbuf(stdout, NULL);
 
@@ -3442,7 +3545,7 @@ int main() {
             }
         }
 
-        free(pos->PvTable->pTable);
+        free(pos->HashTable->pTable);
     }
     return 0;
 }
