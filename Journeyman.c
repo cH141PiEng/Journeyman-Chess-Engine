@@ -4,17 +4,17 @@
 #include <windows.h>
 //#include <unistd.h> //needed for compiling with gcc, but does not work on VS 2019
 
-//Journeyman 1.0
+//Journeyman 1.3
 //Uses _BitScanForward64, __popcnt64
-//Modified version of the Video Instruction Chess Engine video #82
-//Instead of a 120 array board, uses bitboards similar to Butter
+//Modified version of the Video Instruction Chess Engine video #84
+//Instead of a 120 array board, uses bitboards
 //Increased history table ~128 MB
 //Tapered evaluation
-//Evaluates more aspects of the position than 1.1
+//Evaluates more simple aspects of the position as in Ethereal
 
 typedef unsigned long long U64;
 
-#define NAME "Journeyman 1.2"
+#define NAME "Journeyman 1.3"
 #define BRD_SQ_NUM 64
 
 #define MAXGAMEMOVES 2048//Max # of half moves expected in a game
@@ -125,12 +125,11 @@ typedef struct {
     //the history array if we have repetitions in the position
     //posKey idea introduced in video 11
 
+    int bigPce[2];//number of all pieces except pawns
+
     S_UNDO history[MAXGAMEMOVES];//Stores all of the previous game states with things which are stated in the undo 
     //structure and also it helps to check if a move is repeated or not. Can do so by using the 
     //hisPly as the index and going back to all the states and see if the posKey is repeated or not
-
-    // piece list
-    //int pList[13][10];
 
     S_PVTABLE PvTable[1];//Keep one PvTable in the main structure for the current board position...in the form of 
                          // a pointer which is already given memory.
@@ -229,6 +228,7 @@ char SideChar[];
 char RankChar[];
 char FileChar[];
 
+int PieceBig[13];
 int PieceVal[13];
 int PieceCol[13];
 
@@ -245,6 +245,7 @@ char SideChar[] = "wb-";
 char RankChar[] = "12345678";
 char FileChar[] = "abcdefgh";
 
+int PieceBig[13] = { FALSE, FALSE, TRUE, TRUE, TRUE, TRUE, TRUE, FALSE, TRUE, TRUE, TRUE, TRUE, TRUE };
 int PieceVal[13] = { 0, 100, 325, 325, 550, 1000, 50000, 100, 325, 325, 550, 1000, 50000 };
 int PieceCol[13] = { BOTH, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
     BLACK, BLACK, BLACK, BLACK, BLACK, BLACK };
@@ -713,6 +714,22 @@ void PrintBitBoard(U64 bb) {
     printf("\n\n");
 }
 
+int ColorOf(S_BOARD* pos, int sq)
+{
+    if (((pos->ColorBB[0]) & SetMask[sq]) != 0ULL)
+    {
+        return WHITE;
+    }
+    else if (((pos->ColorBB[1]) & SetMask[sq]) != 0ULL)
+    {
+        return BLACK;
+    }
+    else
+    {
+        return 2;
+    }
+}
+
 int peekBit(U64 bb) {
     unsigned long index = -1;
     _BitScanForward64(&index, bb);
@@ -824,6 +841,10 @@ static void ClearPiece(const int sq, S_BOARD* pos) {
     CLRBIT(pos->ColorBB[col], sq);
     CLRBIT(pos->ColorBB[BOTH], sq);
 
+    if (PieceBig[pce]) {
+        pos->bigPce[col]--;
+        
+    }
 }
 
 static void AddPiece(const int sq, S_BOARD* pos, const int pce) {
@@ -838,6 +859,9 @@ static void AddPiece(const int sq, S_BOARD* pos, const int pce) {
     SETBIT(pos->ColorBB[col], sq);
     SETBIT(pos->ColorBB[BOTH], sq);
 
+    if (PieceBig[pce]) {
+        pos->bigPce[col]++;
+    }
 }
 
 static void MovePiece(const int from, const int to, S_BOARD* pos) {
@@ -1013,7 +1037,48 @@ void TakeMove(S_BOARD* pos) {
     }
 }
 
+void MakeNullMove(S_BOARD* pos) {
+
+    pos->ply++;
+    pos->history[pos->hisPly].posKey = pos->posKey;
+
+    if (pos->enPas != 64) HASH_EP;
+
+    pos->history[pos->hisPly].move = NOMOVE;
+    pos->history[pos->hisPly].fiftyMove = pos->fiftyMove;
+    pos->history[pos->hisPly].enPas = pos->enPas;
+    pos->history[pos->hisPly].castlePerm = pos->castlePerm;
+    pos->enPas = 64;
+
+    pos->side ^= 1;
+    pos->hisPly++;
+    HASH_SIDE;
+
+    return;
+}
+
+void TakeNullMove(S_BOARD* pos) {
+
+    pos->hisPly--;
+    pos->ply--;
+
+    if (pos->enPas != 64) HASH_EP;
+
+    pos->castlePerm = pos->history[pos->hisPly].castlePerm;
+    pos->fiftyMove = pos->history[pos->hisPly].fiftyMove;
+    pos->enPas = pos->history[pos->hisPly].enPas;
+
+    if (pos->enPas != 64) HASH_EP;
+    pos->side ^= 1;
+    HASH_SIDE;
+}
+
 // attack
+
+const int KnDir[8] = { -6, -17,	-15, -10, 6, 17, 15, 10 };
+const int RkDir[4] = { -1, -8,	1, 8 };
+const int BiDir[4] = { -7, -9, 7, 9 };
+const int KiDir[8] = { -1, -8,	1, 8, -7, -9, 7, 9 };
 
 // is square attacked by side? - needed in particular to check if king is in check or squares
 // in between king and rook to castle with are attacked by any piece of opposite color.
@@ -1704,80 +1769,91 @@ int ParseFen(char* fen, S_BOARD* pos) {
 
 void UpdateListsMaterial(S_BOARD* pos)
 {
-    int i = 0;
+    int i = 0, piece;
     while (i < 64)
     {
-        if ((pos->pieces[i]) == p)
+        piece = pos->pieces[i];
+        if (piece == p)
         {
             SETBIT(pos->PieceBB[p], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[1], i);
         }
-        else if((pos->pieces[i]) == r)
+        else if(piece == r)
         {
            SETBIT(pos->PieceBB[r], i);
            SETBIT(pos->ColorBB[BOTH], i);
            SETBIT(pos->ColorBB[1], i);
+           pos->bigPce[BLACK]++;
         }
-        else if ((pos->pieces[i]) == n)
+        else if (piece == n)
         {
             SETBIT(pos->PieceBB[n], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[1], i);
+            pos->bigPce[BLACK]++;
         }
-        else if ((pos->pieces[i]) == b)
+        else if (piece == b)
         {
             SETBIT(pos->PieceBB[b], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[1], i);
+            pos->bigPce[BLACK]++;
         }
-        else if ((pos->pieces[i]) == q)
+        else if (piece == q)
         {
             SETBIT(pos->PieceBB[q], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[1], i);
+            pos->bigPce[BLACK]++;
         }
-        else if ((pos->pieces[i]) == k)
+        else if (piece == k)
         {
             SETBIT(pos->PieceBB[k], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[1], i);
+            pos->bigPce[BLACK]++;
         }
-        else if ((pos->pieces[i]) == P)
+        else if (piece == P)
         {
             SETBIT(pos->PieceBB[P], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[0], i);
         }
-        else if ((pos->pieces[i]) == N)
+        else if (piece == N)
         {
             SETBIT(pos->PieceBB[N], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[0], i);
+            pos->bigPce[WHITE]++;
         }
-        else if ((pos->pieces[i]) == B)
+        else if (piece == B)
         {
             SETBIT(pos->PieceBB[B], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[0], i);
+            pos->bigPce[WHITE]++;
         }
-        else if ((pos->pieces[i]) == R)
+        else if (piece == R)
         {
             SETBIT(pos->PieceBB[R], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[0], i);
+            pos->bigPce[WHITE]++;
         }
-        else if ((pos->pieces[i]) == Q)
+        else if (piece == Q)
         {
             SETBIT(pos->PieceBB[Q], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[0], i);
+            pos->bigPce[WHITE]++;
         }
-        else if ((pos->pieces[i]) == K)
+        else if (piece == K)
         {
             SETBIT(pos->PieceBB[K], i);
             SETBIT(pos->ColorBB[BOTH], i);
             SETBIT(pos->ColorBB[0], i);
+            pos->bigPce[WHITE]++;
         }
         i++;
     }
@@ -1800,6 +1876,9 @@ void ResetBoard(S_BOARD* pos) {
     pos->ColorBB[0] = 0ULL;
     pos->ColorBB[1] = 0ULL;
     pos->ColorBB[2] = 0ULL;
+
+    pos->bigPce[0] = 0;
+    pos->bigPce[1] = 0;
 
     pos->side = BOTH;
     pos->enPas = no_sq;
@@ -2053,7 +2132,7 @@ const int PawnEG[64] =
     -1,   0,   4,   7,   7,   4,   0,  -1,
     1,   2,   7,  11,  11,   7,   2,   1,
     5,  11,  13,  14,  14,  13,  11,   5,
-    0,   1,   3,   5,   5,   3,   1,   0,
+    0,   1,   3,   5,   5,   3,   1,   0,    // Pawns 7 Rank
     0,   0,   0,   0,   0,   0,   0,   0
 };
 
@@ -2362,13 +2441,11 @@ int Evalpos(S_BOARD* pos) {
             pawnAttacks[!color] | (myPieces & kings) | blockedPawns[color]
             );
 
-        // Bishop gains a bonus for being in a pair
         if ((tempBishops & WHITE_SQUARES) && (tempBishops & BLACK_SQUARES)) {
             mg += BishopPair[MG];
             eg += BishopPair[EG];
         }
 
-        // King gains a bonus if it still may castle
         else if (pos->castlePerm & (3 << (2 * color))) {
             mg += KING_CAN_CASTLE;
             eg += KING_CAN_CASTLE;
@@ -2438,7 +2515,7 @@ int Evalpos(S_BOARD* pos) {
 
             // Knight is in an outpost square, unable to be
             // attacked by enemy pawns, on or between ranks
-            // four through seven, relative to it's color
+            // four through seven, relative to it's colour
             if (OutpostRanks[color] & (1ULL << bit)
                 && !(OutpostSquareMasks[color][bit] & enemyPawns)) {
 
@@ -2454,7 +2531,6 @@ int Evalpos(S_BOARD* pos) {
             mg += KnightMobility[MG][mobilityCount];
             eg += KnightMobility[EG][mobilityCount];
 
-            // Get the attack counts for this Knight
             attacks = attacks & kingAreas[!color];
             if (attacks) {
                 attackCounts[color] += 2 * bitCount(attacks);
@@ -2482,7 +2558,7 @@ int Evalpos(S_BOARD* pos) {
 
             // Bishop is in an outpost square, unable to be
             // attacked by enemy pawns, on or between ranks
-            // four through seven, relative to it's color
+            // four through seven, relative to it's colour
             if (OutpostRanks[color] & (1ULL << bit)
                 && !(OutpostSquareMasks[color][bit] & enemyPawns)) {
 
@@ -2540,6 +2616,8 @@ int Evalpos(S_BOARD* pos) {
                 }
             }
 
+            // Rook gains a bonus for being located
+            // on seventh rank relative to its color
             if (Rank(bit) == (color == BLACK ? 1 : 6)) {
                 mg += ROOK_ON_7TH_MID;
                 eg += ROOK_ON_7TH_END;
@@ -2812,7 +2890,7 @@ void PerftTest(int depth, S_BOARD* pos) {
 int rootDepth;
 
 static void CheckUp(S_SEARCHINFO* info) {
-    // .. check if time up, or interrupt from GUI
+    // Check if time up or interrupt from GUI
     if (info->timeset == TRUE && GetTimeMs() > info->stoptime) {
         info->stopped = TRUE;
     }
@@ -2957,7 +3035,33 @@ static int Quiescence(int alpha, int beta, S_BOARD* pos, S_SEARCHINFO* info) {
     return alpha;
 }
 
-static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO* info) {
+int BigPiecesExist(S_BOARD* pos, int side)
+{
+    if (side == 0)
+    {
+        if (((pos->PieceBB[N]) | (pos->PieceBB[B]) | (pos->PieceBB[R]) | (pos->PieceBB[Q])) == 0ULL)
+        {
+            return 0;
+        }
+        else
+        {
+            return 1;
+        }
+    }
+    else
+    {
+        if (((pos->PieceBB[n]) | (pos->PieceBB[b]) | (pos->PieceBB[r]) | (pos->PieceBB[q])) == 0ULL)
+        {
+            return 0;
+        }
+        else
+        {
+            return 1;
+        }
+    }
+}
+
+static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO* info, int doNull) {
 
     if (depth == 0) {
         return Quiescence(alpha, beta, pos, info);
@@ -2984,6 +3088,20 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
     }
 
     int Score = -infinite;
+
+    // Null Move Pruning
+    if (doNull && !InCheck && pos->ply && (pos->bigPce[pos->side] > 0) && depth >= 4) {
+        MakeNullMove(pos);
+        Score = -AlphaBeta(-beta, -beta + 1, depth - 4, pos, info, 0);
+        TakeNullMove(pos);
+        if (info->stopped == 1) {
+            return 0;
+        }
+
+        if (Score >= beta && abs(Score) < ISMATE) {
+            return beta;
+        }
+    }
 
     S_MOVELIST list[1];
     GenerateAllMoves(pos, list);
@@ -3015,7 +3133,7 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
 
         //if move is legal
         Legal++;
-        Score = -AlphaBeta(-beta, -alpha, depth - 1, pos, info);
+        Score = -AlphaBeta(-beta, -alpha, depth - 1, pos, info, 1);
         TakeMove(pos);
 
         if (info->stopped == TRUE) {
@@ -3082,10 +3200,11 @@ void SearchPosition(S_BOARD* pos, S_SEARCHINFO* info) {
 
     ClearForSearch(pos, info);
 
+    // iterative deepening
     for (currentDepth = 1; currentDepth <= info->depth; ++currentDepth) {
-                             // alpha	 beta
+                            // alpha	 beta
         rootDepth = currentDepth;
-        bestScore = AlphaBeta(-infinite, infinite, currentDepth, pos, info);
+        bestScore = AlphaBeta(-infinite, infinite, currentDepth, pos, info, 1);
 
         if (info->stopped == TRUE) {
             break;
