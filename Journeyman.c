@@ -2,9 +2,10 @@
 #include "stdlib.h"
 #include "string.h"
 #include <windows.h>
+#include <stdbool.h>
 //#include <unistd.h> //needed for compiling with gcc, but does not work on VS 2019
 
-//Journeyman 1.4
+//Journeyman 1.5
 //Uses _BitScanForward64, __popcnt64
 //Modified version of the Video Instruction Chess Engine video #87
 //Instead of a 120 array board, uses bitboards
@@ -14,7 +15,7 @@
 
 typedef unsigned long long U64;
 
-#define NAME "Journeyman 1.4"
+#define NAME "Journeyman 1.5"
 #define BRD_SQ_NUM 64
 
 #define MAXGAMEMOVES 2048//Max # of half moves expected in a game
@@ -322,6 +323,7 @@ U64 IsolatedPawnMasks[64];
 U64 PassedPawnMasks[2][64];
 U64 PawnAttackMasks[2][64];
 U64 PawnAdvanceMasks[2][64];
+U64 PawnConnectedMasks[2][64];
 U64 OutpostSquareMasks[2][64];
 U64 OutpostRanks[2];
 
@@ -437,6 +439,26 @@ void initalizeMasks() {
 
     OutpostRanks[WHITE] = RANK4 | RANK5 | RANK6;
     OutpostRanks[BLACK] = RANK3 | RANK4 | RANK5;
+
+    // INITALIZE PAWN-CONNECTED MASKS
+    for (i = 8; i < 56; i++) {
+        file = i % 8;
+
+        if (file == 0) {
+            PawnConnectedMasks[0][i] = (1ULL << (i + 1)) | (1ULL << (i - 7));
+            PawnConnectedMasks[1][i] = (1ULL << (i + 1)) | (1ULL << (i + 9));
+        }
+
+        else if (file == 7) {
+            PawnConnectedMasks[0][i] = (1ULL << (i - 1)) | (1ULL << (i - 9));
+            PawnConnectedMasks[1][i] = (1ULL << (i - 1)) | (1ULL << (i + 7));
+        }
+
+        else {
+            PawnConnectedMasks[0][i] = (1ULL << (i - 1)) | (1ULL << (i - 9)) | (1ULL << (i + 1)) | (1ULL << (i - 7));
+            PawnConnectedMasks[1][i] = (1ULL << (i - 1)) | (1ULL << (i + 7)) | (1ULL << (i + 1)) | (1ULL << (i + 9));
+        }
+    }
 }
 
 U64 KingAttacks[64];
@@ -2343,20 +2365,46 @@ const int PassedPawn[2][2][RANK_NB][PhaseNb] = {
    {{   0,   0}, {  -5,   8}, { -12,  17}, { -21,  52}, { -14, 109}, {  28, 202}, { 119, 369}, {   0,   0}}},
 };
 
+const int KnightAttackedByPawn[PhaseNb] = { -34, -30 };
+
+const int KnightBehindPawn[2] = { 4, 18 };
+
 int KnightMobility[PhaseNb][9] = {
     {-30, -25, -10,   0,  10,  18,  26,  34,  42},
     {-30, -25,   0,   9,  15,  21,  28,  35,  36}
 };
+
+const int BishopAttackedByPawn[PhaseNb] = { -33, -29 };
 
 int BishopMobility[PhaseNb][14] = {
     {-30, -20, -15,   0, 15,  21,  26,  31,  34,  36,  37,  38,  38,  38},
     {-30, -20, -15,   0, 15,  21,  26,  31,  34,  36,  37,  38,  38,  38},
 };
 
+const int BishopBehindPawn[2] = { 3, 13 };
+
 int RookMobility[PhaseNb][15] = {
     {-30, -25, -10,  -5,  -3,  -1,   6,  11,  15,  19,  23,  25,  26,  27, 27},
     {-35, -20, -10,   0,  10,  19,  27,  33,  39,  41,  43,  45,  47,  48, 48}
 };
+
+const int QueenChecked[PhaseNb] = { -50, -29 };
+
+const int QueenCheckedByPawn[PhaseNb] = { -60, -37 };
+
+const int QueenMobility[PhaseNb][28] = {
+    {-50, -40, -20,   0,   2,   4,   6,
+       8,  11,  15,  19,  20,  21,  22,
+      24,  24,  24,  24,  24,  24,  24,
+      24,  24,  24,  24,  24,  24,  24},
+
+    {-50, -40, -20, -10,   0,   4,   8,
+      12,  15,  18,  21,  24,  27,  30,
+      35,  43,  43,  43,  43,  43,  43,
+      43,  43,  43,  43,  43,  43,  43}
+};
+
+const int BishopHasWings[PhaseNb] = { 13, 36 };
 
 const int BishopPair[PhaseNb] = { 46, 64 };
 
@@ -2375,7 +2423,28 @@ int SafetyTable[100] = { // Taken from CPW / Stockfish
  500, 500, 500, 500, 500, 500, 500, 500, 500, 500
 };
 
-#define ColourNb 2
+int PawnConnected[2][64] = {
+    { 0, 0, 0, 0, 0, 0, 0, 0,
+      2, 2, 2, 3, 3, 2, 2, 2,
+      4, 4, 5, 6, 6, 5, 4, 4,
+      7, 8,10,12,12,10, 8, 7,
+     11,14,17,21,21,17,14,11,
+     16,21,25,33,33,25,12,16,
+     32,42,50,55,55,50,42,32,
+      0, 0, 0, 0, 0, 0, 0, 0, },
+
+    { 0, 0, 0, 0, 0, 0, 0, 0,
+     32,42,50,55,55,50,42,32,
+     16,21,25,33,33,25,12,16,
+     11,14,17,21,21,17,14,11,
+      7, 8,10,12,12,10, 8, 7,
+      4, 4, 5, 6, 6, 5, 4, 4,
+      2, 2, 2, 3, 3, 2, 2, 2,
+      0, 0, 0, 0, 0, 0, 0, 0, }
+};
+
+#define LEFT_WING  (FILEA | FILEB | FILEC)
+#define RIGHT_WING (FILEF | FILEG | FILEH)
 
 #define WHITE_SQUARES 0x55AA55AA55AA55AA
 #define BLACK_SQUARES 0xAA55AA55AA55AA55
@@ -2395,10 +2464,24 @@ int SafetyTable[100] = { // Taken from CPW / Stockfish
 #define PAWN_ISOLATED_MID    (10)
 #define PAWN_ISOLATED_END    (20)
 
+const int PawnBackwards[2][2] = { {7, -3}, {-11, -11} };
+const int KnightRammedPawns[2] = { 0, 5 };
+const int BishopRammedPawns[2] = { -11, -12 };
+
+int KingDefenders[12][2] = {
+    {-32, -3}, {-15, 7}, {0, 1}, {9, -1},
+    {23, -6}, {34, 3}, {32, 12}, {24, 0},
+    {12, 6}, {12, 6}, {12, 6}, {12, 6},
+};
+
 #define FILE_NB 8
 
 U64 pawnAdvance(U64 pawns, U64 occupied, int color) {
     return ~occupied & (color == WHITE ? (pawns << 8) : (pawns >> 8));
+}
+
+bool testBit(U64 b, int i) {
+    return b & (1ULL << i);
 }
 
 static inline int fileOf(int square) {
@@ -2469,9 +2552,15 @@ int Evalpos(S_BOARD* pos) {
     };
 
     U64 allAttackBoards[2];
+    U64 attackedNoQueen[2];
 
-    allAttackBoards[WHITE] = kingAttacks(wKingSq, ~0ULL);
-    allAttackBoards[BLACK] = kingAttacks(bKingSq, ~0ULL);
+    allAttackBoards[WHITE] = attackedNoQueen[WHITE] = kingAttacks(wKingSq, ~0ULL);
+    allAttackBoards[BLACK] = attackedNoQueen[BLACK] = kingAttacks(bKingSq, ~0ULL);
+
+    U64 rammedPawns[2] = {
+        pawnAdvance(blackPawns, ~whitePawns, BLACK),
+        pawnAdvance(whitePawns, ~blackPawns, WHITE)
+    };
 
     int attackCounts[2] = { 0, 0 };
     int attackerCounts[2] = { 0, 0 };
@@ -2501,6 +2590,12 @@ int Evalpos(S_BOARD* pos) {
             pawnAttacks[!color] | (myPieces & kings) | blockedPawns[color]
             );
 
+        // Bishop gains a bonus for pawn wings
+        if (tempBishops && (myPawns & LEFT_WING) && (myPawns & RIGHT_WING)) {
+            mg += BishopHasWings[MG];
+            eg += BishopHasWings[EG];
+        }
+
         if ((tempBishops & WHITE_SQUARES) && (tempBishops & BLACK_SQUARES)) {
             mg += BishopPair[MG];
             eg += BishopPair[EG];
@@ -2511,9 +2606,28 @@ int Evalpos(S_BOARD* pos) {
             eg += KING_CAN_CASTLE;
         }
 
+        if (color == WHITE)
+        {
+            defenders = (pos->PieceBB[P])
+                | (pos->PieceBB[N])
+                | (pos->PieceBB[B]);
+        }
+        else
+        {
+            defenders = (pos->PieceBB[p])
+                | (pos->PieceBB[n])
+                | (pos->PieceBB[b]);
+        }
+
+        // Bonus for our pawns and minors sitting within our king area
+        count = bitCount(defenders & kingAreas[color]);
+        mg += KingDefenders[count][MG];
+        eg += KingDefenders[count][EG];
+
         // Get the attack board for the pawns
         attacks = pawnAttacks[color] & kingAreas[!color];
         allAttackBoards[color] |= pawnAttacks[color];
+        attackedNoQueen[color] |= attacks;
 
         // Update the counters for the safety evaluation
         if (attacks) {
@@ -2553,6 +2667,20 @@ int Evalpos(S_BOARD* pos) {
                 eg -= PAWN_STACKED_END;
             }
 
+            // Apply a penalty if the pawn is backward
+            if (!(PassedPawnMasks[!color][bit] & myPawns)
+                && (pawnAttacks[!color] & (1ULL << (bit + forward)))) {
+                semi = !(FILES[fileOf(bit)] & enemyPawns);
+                mg += PawnBackwards[semi][MG];
+                eg += PawnBackwards[semi][EG];
+            }
+
+            // Apply a bonus if the pawn is connected
+            if (PawnConnectedMasks[color][bit] & myPawns) {
+                mg += PawnConnected[color][bit];
+                eg += PawnConnected[color][bit];
+            }
+
         }
 
         while (tempKnights) {
@@ -2572,6 +2700,13 @@ int Evalpos(S_BOARD* pos) {
 
             attacks = KnightAttacks[bit];
             allAttackBoards[color] |= attacks;
+            attackedNoQueen[color] |= attacks;
+
+            // Apply a penalty if the knight is being attacked by a pawn
+            if (pawnAttacks[!color] & (1ULL << bit)) {
+                mg += KnightAttackedByPawn[MG];
+                eg += KnightAttackedByPawn[EG];
+            }
 
             // Knight is in an outpost square, unable to be
             // attacked by enemy pawns, on or between ranks
@@ -2583,6 +2718,12 @@ int Evalpos(S_BOARD* pos) {
 
                 mg += KnightOutpostValues[MG][defended];
                 eg += KnightOutpostValues[EG][defended];
+            }
+
+            // Apply a bonus if the knight is behind a pawn
+            if (testBit(pawnAdvance((myPawns | enemyPawns), 0ULL, !color), bit)) {
+                mg += KnightBehindPawn[MG];
+                eg += KnightBehindPawn[EG];
             }
 
             // Knight gains a mobility bonus based off of the number
@@ -2615,6 +2756,19 @@ int Evalpos(S_BOARD* pos) {
 
             attacks = BishopAttacks(pos, bit);
             allAttackBoards[color] |= attacks;
+            attackedNoQueen[color] |= attacks;
+
+            // Apply a penalty if the bishop is being attacked by a pawn
+            if (pawnAttacks[!color] & (1ULL << bit)) {
+                mg += BishopAttackedByPawn[MG];
+                eg += BishopAttackedByPawn[EG];
+            }
+
+            // Apply a penalty for the bishop based on number of rammed pawns
+            // of our own colour, which reside on the same shade of square as the bishop
+            count = bitCount(rammedPawns[color] & (((1ULL << bit) & WHITE_SQUARES ? WHITE_SQUARES : BLACK_SQUARES)));
+            mg += count * BishopRammedPawns[MG];
+            eg += count * BishopRammedPawns[EG];
 
             // Bishop is in an outpost square, unable to be
             // attacked by enemy pawns, on or between ranks
@@ -2626,6 +2780,12 @@ int Evalpos(S_BOARD* pos) {
 
                 mg += BishopOutpostValues[MG][defended];
                 eg += BishopOutpostValues[EG][defended];
+            }
+
+            // Apply a bonus if the bishop is behind a pawn
+            if (testBit(pawnAdvance((myPawns | enemyPawns), 0ULL, !color), bit)) {
+                mg += BishopBehindPawn[MG];
+                eg += BishopBehindPawn[EG];
             }
 
             // Bishop gains a mobility bonus based off of the number
@@ -2659,6 +2819,7 @@ int Evalpos(S_BOARD* pos) {
 
             attacks = RookAttacks(pos, bit);
             allAttackBoards[color] |= attacks;
+            attackedNoQueen[color] |= attacks;
 
             // Rook is on a semi-open file if there are no
             // pawns of the Rook's color on the file. If
@@ -2713,6 +2874,24 @@ int Evalpos(S_BOARD* pos) {
 
             attacks = (RookAttacks(pos, bit) | BishopAttacks(pos, bit));
             allAttackBoards[color] |= attacks;
+
+            // Apply a bonus if the queen is under an attack threat
+            if ((1ULL << bit) & attackedNoQueen[!color]) {
+                eg += QueenChecked[MG];
+                mg += QueenChecked[EG];
+            }
+
+            // Apply a penalty if the queen is under attack by a pawn
+            if ((1ULL << bit) & pawnAttacks[!color]) {
+                eg += QueenCheckedByPawn[MG];
+                mg += QueenCheckedByPawn[EG];
+            }
+
+            // Queen gains a mobility bonus based off of the number
+            // of attacked or defended squares within the mobility area
+            mobilityCount = bitCount((mobilityArea & attacks));
+            mg += QueenMobility[MG][mobilityCount];
+            eg += QueenMobility[EG][mobilityCount];
 
             attacks = attacks & kingAreas[!color];
             if (attacks) {
