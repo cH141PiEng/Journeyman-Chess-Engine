@@ -2,20 +2,22 @@
 #include "stdlib.h"
 #include "string.h"
 #include <windows.h>
+#include "math.h"
 #include <stdbool.h>
 //#include <unistd.h> //needed for compiling with gcc, but does not work on VS 2019
 
-//Journeyman 1.5
+//Journeyman 1.6
 //Uses _BitScanForward64, __popcnt64
 //Modified version of the Video Instruction Chess Engine video #87
 //Instead of a 120 array board, uses bitboards
 //Increased history table ~128 MB
 //Tapered evaluation
 //Evaluates more aspects of the position
+//Razoring, Reverse futility pruning and LMR as in CeeChess 1.3
 
 typedef unsigned long long U64;
 
-#define NAME "Journeyman 1.5"
+#define NAME "Journeyman 1.6"
 #define BRD_SQ_NUM 64
 
 #define MAXGAMEMOVES 2048//Max # of half moves expected in a game
@@ -668,6 +670,15 @@ void generateKingMap() {
     }
 }
 
+int LMRTable[32][32];
+
+void InitSearch() {
+    // creating the LMR table entries (idea from Ethereal)
+    for (int moveDepth = 1; moveDepth < 32; moveDepth++)
+        for (int played = 1; played < 32; played++)
+            LMRTable[moveDepth][played] = 0.75 + (log(moveDepth) * log(played) / 2.25);
+}
+
 void AllInit() {
     InitBitMasks();
 
@@ -688,6 +699,7 @@ void AllInit() {
     InitMvvLva();
 
     generateKingMap();
+    InitSearch();
 }
 
 // bitboards
@@ -3122,8 +3134,6 @@ void PerftTest(int depth, S_BOARD* pos) {
 
 //search
 
-int rootDepth;
-
 static void CheckUp(S_SEARCHINFO* info) {
     // .. check if time up, or interrupt from GUI
     if (info->timeset == TRUE && GetTimeMs() > info->stoptime) {
@@ -3316,7 +3326,19 @@ int BigPiecesExist(S_BOARD* pos, int side)
 static const int RR = 2;
 static const int minDepth = 3;
 
-static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO* info, int doNull) {
+// Razoring Values
+static const int RazorDepth = 3;
+static const int RazorMargin[4] = { 0, 200, 400, 600 };
+
+// Reverse Futility Values
+static const int RevFutilityDepth = 4;
+static const int RevFutilityMargin[5] = { 0, 250, 500, 750, 1000 };
+
+/// LMR Values
+static const int LateMoveDepth = 3;
+static const int FullSearchMoves = 4;
+
+static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO* info, int doNull, int DoLMR) {
 
     int InCheck = UnderCheck(pos, pos->side);
 
@@ -3353,17 +3375,31 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
 
     int PvMove = NOMOVE;
 
-    if (ProbeHashEntry(pos, &PvMove, &Score, alpha, beta, depth) !=0) {
+    if (ProbeHashEntry(pos, &PvMove, &Score, alpha, beta, depth) == 1) {
         pos->HashTable->cut++;
         return Score;
     }
 
     const int positionEval = Evalpos(pos);
 
+    // Razoring
+    if (depth <= RazorDepth && !PvMove && !InCheck && positionEval + RazorMargin[depth] <= alpha) {
+        // drop into qSearch if move most likely won't beat alpha
+        Score = Quiescence(alpha - RazorMargin[depth], beta - RazorMargin[depth], pos, info);
+        if (Score + RazorMargin[depth] <= alpha) {
+            return Score;
+        }
+    }
+
+    // Reverse Futility Pruning (prunes near beta)
+    if (depth <= RevFutilityDepth && !PvMove && !InCheck && abs(beta) < ISMATE && positionEval - RevFutilityMargin[depth] >= beta) {
+        return positionEval - RevFutilityMargin[depth];
+    }
+
     // Null Move Pruning
     if (depth >= minDepth && doNull && !InCheck && pos->ply && (BigPiecesExist(pos, pos->side)) && positionEval >= beta) {
         MakeNullMove(pos);
-        Score = -AlphaBeta(-beta, -beta + 1, depth - 1 - RR, pos, info, 0);
+        Score = -AlphaBeta(-beta, -beta + 1, depth - 1 - RR, pos, info, 0, 0);
         TakeNullMove(pos);
         if (info->stopped == 1) {
             return 0;
@@ -3396,6 +3432,8 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
         }
     }
 
+    int FoundPv = 0;
+
     for (MoveNum = 0; MoveNum < list->count; ++MoveNum) {
 
         PickNextMove(MoveNum, list);
@@ -3407,7 +3445,36 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
 
         //if move is legal
         Legal++;
-        Score = -AlphaBeta(-beta, -alpha, depth - 1, pos, info, 1);
+
+        // PVS (speeds up search with good move ordering)
+        if (FoundPv == TRUE) {
+
+            // Late Move Reductions at Root (reduces moves if past full move search limit (not reducing captures, checks, or promotions))
+            if (depth >= LateMoveDepth && !(list->moves[MoveNum].move & MFLAGCAP) && !(list->moves[MoveNum].move & MFLAGPROM) && !UnderCheck(pos, pos->side) && DoLMR && Legal > FullSearchMoves && !(list->moves[MoveNum].score == 800000 || list->moves[MoveNum].score == 900000)) {
+
+                // get initial reduction depth
+                int reduce = LMRTable[MIN(depth, 63)][MIN(Legal, 63)];
+                // search with the reduced depth
+                Score = -AlphaBeta(-alpha - 1, -alpha, depth - 1 - reduce, pos, info, 1, 0);
+
+            }
+            else {
+                // If LMR conditions not met (not at root, or tactical move), do a null window search (because we are using PVS)
+                Score = -AlphaBeta(-alpha - 1, -alpha, depth - 1, pos, info, 1, 1);
+
+            }
+            if (Score > alpha&& Score < beta) {
+                // If the LMR or the null window fails, do a full search
+                Score = -AlphaBeta(-beta, -alpha, depth - 1, pos, info, 1, 0);
+
+            }
+        }
+        else {
+            // If no PV found, do a full search
+            Score = -AlphaBeta(-beta, -alpha, depth - 1, pos, info, 1, 0);
+
+        }
+
         TakeMove(pos);
 
         if (info->stopped == TRUE) {
@@ -3433,6 +3500,7 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
 
                     return beta;
                 }
+                FoundPv = 1;
                 alpha = Score;
 
                 if (!(list->moves[MoveNum].move & MFLAGCAP)) {
@@ -3485,8 +3553,7 @@ void SearchPosition(S_BOARD* pos, S_SEARCHINFO* info) {
 
     for (currentDepth = 1; currentDepth <= info->depth; ++currentDepth) {
                             // alpha	 beta
-        rootDepth = currentDepth;
-        bestScore = AlphaBeta(-infinite, infinite, currentDepth, pos, info, 1);
+        bestScore = AlphaBeta(-infinite, infinite, currentDepth, pos, info, 1, 1);
 
         if (info->stopped == TRUE) {
             break;
