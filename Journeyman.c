@@ -6,7 +6,7 @@
 #include <stdbool.h>
 //#include <unistd.h> //needed for compiling with gcc, but does not work on VS 2019
 
-//Journeyman 1.6
+//Journeyman 1.7
 //Uses _BitScanForward64, __popcnt64
 //Modified version of the Video Instruction Chess Engine video #87
 //Instead of a 120 array board, uses bitboards
@@ -14,10 +14,11 @@
 //Tapered evaluation
 //Evaluates more aspects of the position
 //Razoring, Reverse futility pruning and LMR as in CeeChess 1.3
+//Aspiration Window as in Weiss 0.6 
 
 typedef unsigned long long U64;
 
-#define NAME "Journeyman 1.6"
+#define NAME "Journeyman 1.7"
 #define BRD_SQ_NUM 64
 
 #define MAXGAMEMOVES 2048//Max # of half moves expected in a game
@@ -3175,10 +3176,10 @@ static int IsRepetition(const S_BOARD* pos) {
 
 static void ClearForSearch(S_BOARD* pos, S_SEARCHINFO* info) {
 
-    int index = 0;
-    int index2 = 0;
+    int index;
+    int index2;
 
-    for (index = 0; index < 13; ++index) {
+    for (int index = 0; index < 13; ++index) {
         for (index2 = 0; index2 < BRD_SQ_NUM; ++index2) {
             pos->searchHistory[index][index2] = 0;
         }
@@ -3261,11 +3262,10 @@ static int Quiescence(int alpha, int beta, S_BOARD* pos, S_SEARCHINFO* info) {
     S_MOVELIST list[1];
     GenerateAllCaps(pos, list);
 
-    int MoveNum = 0;
     int Legal = 0;
     Score = -infinite;
 
-    for (MoveNum = 0; MoveNum < list->count; ++MoveNum) {
+    for (int MoveNum = 0; MoveNum < list->count; ++MoveNum) {
 
         PickNextMove(MoveNum, list);
 
@@ -3375,7 +3375,7 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
 
     int PvMove = NOMOVE;
 
-    if (ProbeHashEntry(pos, &PvMove, &Score, alpha, beta, depth) == 1) {
+    if (ProbeHashEntry(pos, &PvMove, &Score, alpha, beta, depth) != 0) {
         pos->HashTable->cut++;
         return Score;
     }
@@ -3529,6 +3529,36 @@ static int AlphaBeta(int alpha, int beta, int depth, S_BOARD* pos, S_SEARCHINFO*
     return alpha;
 }
 
+int AspirationWindow(S_BOARD* pos, S_SEARCHINFO* info, const int depth, int previousScore) {
+
+    // Dynamic bonus increasing initial window and delta
+    const int bonus = (previousScore * previousScore) / 8;
+    // Delta used for initial window and widening
+    const int delta = 50 + bonus;
+    // Initial window
+    int alpha = previousScore - delta / 4;
+    int beta = previousScore + delta / 4;
+    // Counter for failed searches, bounds are relaxed more for each successive fail
+    unsigned fails = 0;
+
+    while (true) {
+        int result = AlphaBeta(alpha, beta, depth, pos, info, 1, 1);
+        // Result within the bounds is accepted as correct
+        if ((result >= alpha && result <= beta) || info->stopped)
+            return result;
+        // Failed low, relax lower bound and search again
+        else if (result < alpha) {
+            alpha -= delta << fails++;
+            alpha = MAX(alpha, -infinite);
+            // Failed high, relax upper bound and search again
+        }
+        else if (result > beta) {
+            beta += delta << fails++;
+            beta = MIN(beta, infinite);
+        }
+    }
+}
+
 int absoluteValue(int i)
 {
     if (i > 0)
@@ -3545,15 +3575,19 @@ void SearchPosition(S_BOARD* pos, S_SEARCHINFO* info) {
 
     int bestMove = NOMOVE;
     int bestScore = -infinite;
-    int currentDepth = 0;
-    int pvMoves = 0;
-    int pvNum = 0;
+    int pvMoves;
 
     ClearForSearch(pos, info);
 
-    for (currentDepth = 1; currentDepth <= info->depth; ++currentDepth) {
-                            // alpha	 beta
-        bestScore = AlphaBeta(-infinite, infinite, currentDepth, pos, info, 1, 1);
+    for (int currentDepth = 1; currentDepth <= info->depth; ++currentDepth) {
+        if (currentDepth > 6)
+        {
+            bestScore = AspirationWindow(pos, info, currentDepth, bestScore);
+        }
+        else
+        {
+            bestScore = AlphaBeta(-infinite, infinite, currentDepth, pos, info, 1, 1);
+        }
 
         if (info->stopped == TRUE) {
             break;
@@ -3575,7 +3609,7 @@ void SearchPosition(S_BOARD* pos, S_SEARCHINFO* info) {
         
         pvMoves = GetPvLine(currentDepth, pos);
         printf("pv");
-        for (pvNum = 0; pvNum < pvMoves; ++pvNum) {
+        for (int pvNum = 0; pvNum < pvMoves; ++pvNum) {
              printf(" %s", PrMove(pos->PvArray[pvNum]));
             }
             printf("\n");
