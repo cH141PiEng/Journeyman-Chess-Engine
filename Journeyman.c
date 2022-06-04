@@ -6,7 +6,7 @@
 #include <stdbool.h>
 //#include <unistd.h> //needed for compiling with gcc, but does not work on VS 2019
 
-//Journeyman 1.7
+//Journeyman 1.7.1
 //Uses _BitScanForward64, __popcnt64
 //Modified version of the Video Instruction Chess Engine video #87
 //Instead of a 120 array board, uses bitboards
@@ -14,11 +14,12 @@
 //Tapered evaluation
 //Evaluates more aspects of the position
 //Razoring, Reverse futility pruning and LMR as in CeeChess 1.3
-//Aspiration Window as in Weiss 0.6 
+//Aspiration Window as in Weiss 0.6
+//Piece square tables from Ethereal 9.30
 
 typedef unsigned long long U64;
 
-#define NAME "Journeyman 1.7"
+#define NAME "Journeyman 1.7.1"
 #define BRD_SQ_NUM 64
 
 #define MAXGAMEMOVES 2048//Max # of half moves expected in a game
@@ -680,6 +681,138 @@ void InitSearch() {
             LMRTable[moveDepth][played] = 0.75 + (log(moveDepth) * log(played) / 2.25);
 }
 
+const int SQInv[64] = {
+    56,  57,  58,  59,  60,  61,  62,  63,
+    48,  49,  50,  51,  52,  53,  54,  55,
+    40,  41,  42,  43,  44,  45,  46,  47,
+    32,  33,  34,  35,  36,  37,  38,  39,
+    24,  25,  26,  27,  28,  29,  30,  31,
+    16,  17,  18,  19,  20,  21,  22,  23,
+     8,   9,  10,  11,  12,  13,  14,  15,
+     0,   1,   2,   3,   4,   5,   6,   7,
+};
+
+int square32(int sq) {
+    static const int table[8] = { 0, 1, 2, 3, 3, 2, 1, 0 };
+    return ((sq >> 3) << 2) + table[sq & 0x7];
+}
+
+int relativeSquare32(int sq, int colour) {
+    return colour == WHITE ? square32(sq) : square32(SQInv[sq]);
+}
+
+#define SQUARE_NB 64
+#define PHASE_NB 2
+
+int PSQTMidgame[32][SQUARE_NB];
+int PSQTEndgame[32][SQUARE_NB];
+
+const int PawnPSQT32[32][PHASE_NB] = {
+    {   0,   0}, {   0,   0}, {   0,   0}, {   0,   0},
+    { -23,   2}, {  12,   3}, {  -5,   6}, {  -6,  -2},
+    { -25,   0}, {  -3,  -1}, {  -5,  -6}, {  -3, -10},
+    { -21,   7}, {  -6,   6}, {   3,  -9}, {   3, -22},
+    { -12,  14}, {   3,   8}, {  -1,  -3}, {   4, -23},
+    {   3,  25}, {  14,  23}, {  18,   3}, {  16, -23},
+    { -40,   6}, { -32,   9}, {   2, -17}, {   4, -33},
+    {   0,   0}, {   0,   0}, {   0,   0}, {   0,   0},
+};
+
+const int KnightPSQT32[32][PHASE_NB] = {
+    { -33, -46}, {   4, -40}, { -12, -12}, {   9,  -8},
+    {  10, -50}, {   2, -12}, {  17, -24}, {  20,  -3},
+    {   5, -18}, {  29, -18}, {  16,   5}, {  29,  15},
+    {   7,  11}, {  27,   9}, {  31,  34}, {  38,  37},
+    {  28,   9}, {  36,  15}, {  35,  41}, {  48,  42},
+    { -23,   9}, {  38,   7}, {  42,  39}, {  50,  36},
+    { -44, -18}, { -41,   7}, {  60, -26}, {  14,  -1},
+    {-163, -29}, {-103, -30}, {-154,  -6}, { -55, -23},
+};
+
+const int BishopPSQT32[32][PHASE_NB] = {
+    {  14, -21}, {  21, -21}, {   2, -10}, {  19, -14},
+    {  31, -28}, {  33, -23}, {  23, -14}, {  10,  -2},
+    {  25, -11}, {  32, -12}, {  25,   1}, {  19,   7},
+    {  10,  -3}, {  13,   0}, {  11,  15}, {  33,  20},
+    {  -9,  14}, {  23,   4}, {  10,  17}, {  35,  21},
+    {  -6,  10}, {   8,   9}, {  32,   8}, {  22,   5},
+    { -55,   6}, {  13,  -3}, {  -2, -10}, { -36,   3},
+    { -35,  -1}, { -55,  -3}, {-144,   7}, {-124,  16},
+};
+
+const int RookPSQT32[32][PHASE_NB] = {
+    {  -4, -32}, {  -7, -16}, {   5, -13}, {  11, -20},
+    { -33, -25}, {  -7, -26}, {   0, -20}, {  10, -26},
+    { -22, -21}, {   2, -13}, {   1, -21}, {   1, -20},
+    { -23,  -1}, { -12,   5}, {  -7,   3}, {  -1,   2},
+    { -15,  14}, {  -8,   9}, {  20,   8}, {  21,   8},
+    { -14,  17}, {  18,  12}, {  20,  15}, {  22,  14},
+    {   0,  18}, {  -4,  18}, {  40,   3}, {  22,   9},
+    {  -1,  25}, {  17,  15}, { -19,  24}, {  11,  30},
+};
+
+const int QueenPSQT32[32][PHASE_NB] = {
+    {  -3, -45}, { -13, -26}, {  -6, -17}, {  14, -39},
+    {   3, -49}, {  12, -36}, {  19, -50}, {  14, -16},
+    {   6, -22}, {  23, -19}, {   6,   3}, {   4,   3},
+    {   4,  -5}, {   6,   3}, {   0,  11}, {  -5,  45},
+    {  -9,  10}, { -12,  31}, {  -5,  20}, { -20,  50},
+    {  -3,   3}, {   4,  21}, {   7,  18}, {  -6,  45},
+    {   8,  15}, { -53,  55}, {  32,  12}, { -13,  70},
+    { -18, -32}, {   5, -18}, {   0, -14}, { -10,  10},
+};
+
+const int KingPSQT32[32][PHASE_NB] = {
+    {  78,-103}, {  88, -79}, {  37, -35}, {  20, -37},
+    {  69, -53}, {  61, -45}, {  14,  -6}, { -16,   1},
+    {  -1, -41}, {  46, -29}, {  20,  -1}, { -10,  14},
+    { -52, -35}, {  29, -21}, {   7,  15}, { -46,  35},
+    { -27, -19}, {  53,   1}, {   7,  30}, { -34,  37},
+    {  38, -17}, {  82,   2}, {  63,  19}, {  -3,  17},
+    {  25, -15}, {  60,  -2}, {  39,   4}, {  23,   7},
+    {   1, -80}, {  97, -59}, { -12, -34}, { -21, -31},
+};
+
+#define MG 0
+#define EG 1
+
+void initializePSQT() {
+
+    int sq, w32, b32;
+
+    for (sq = 0; sq < SQUARE_NB; sq++) {
+
+        w32 = relativeSquare32(sq, WHITE);
+        b32 = relativeSquare32(sq, BLACK);
+
+        PSQTMidgame[P][sq] = PawnPSQT32[w32][MG];
+        PSQTEndgame[P][sq] = PawnPSQT32[w32][EG];
+        PSQTMidgame[N][sq] = KnightPSQT32[w32][MG];
+        PSQTEndgame[N][sq] = KnightPSQT32[w32][EG];
+        PSQTMidgame[B][sq] = BishopPSQT32[w32][MG];
+        PSQTEndgame[B][sq] = BishopPSQT32[w32][EG];
+        PSQTMidgame[R][sq] = RookPSQT32[w32][MG];
+        PSQTEndgame[R][sq] = RookPSQT32[w32][EG];
+        PSQTMidgame[Q][sq] = QueenPSQT32[w32][MG];
+        PSQTEndgame[Q][sq] = QueenPSQT32[w32][EG];
+        PSQTMidgame[K][sq] = KingPSQT32[w32][MG];
+        PSQTEndgame[K][sq] = KingPSQT32[w32][EG];
+
+        PSQTMidgame[p][sq] = PawnPSQT32[b32][MG];
+        PSQTEndgame[p][sq] = PawnPSQT32[b32][EG];
+        PSQTMidgame[n][sq] = KnightPSQT32[b32][MG];
+        PSQTEndgame[n][sq] = KnightPSQT32[b32][EG];
+        PSQTMidgame[b][sq] = BishopPSQT32[b32][MG];
+        PSQTEndgame[b][sq] = BishopPSQT32[b32][EG];
+        PSQTMidgame[r][sq] = RookPSQT32[b32][MG];
+        PSQTEndgame[r][sq] = RookPSQT32[b32][EG];
+        PSQTMidgame[q][sq] = QueenPSQT32[b32][MG];
+        PSQTEndgame[q][sq] = QueenPSQT32[b32][EG];
+        PSQTMidgame[k][sq] = KingPSQT32[b32][MG];
+        PSQTEndgame[k][sq] = KingPSQT32[b32][EG];
+    }
+}
+
 void AllInit() {
     InitBitMasks();
 
@@ -701,6 +834,7 @@ void AllInit() {
 
     generateKingMap();
     InitSearch();
+    initializePSQT();
 }
 
 // bitboards
@@ -2204,164 +2338,6 @@ int ProbePvMove(const S_BOARD* pos) {
 
 //evaluate
 
-// Piece Square Tables (by Lyudmil)
-const int PawnMG[64] =
-{
-    0,   0,   0,   0,   0,   0,   0,   0,
-    -5,  -2,   4,   5,   5,   4,  -2,  -5,
-    -4,  -2,   5,   7,   7,   5,  -2,  -4,
-    -2,  -1,   9,  13,  13,   9,  -1,  -2,
-    2,   4,  13,  21,  21,  13,   4,   2,
-    10,  21,  25,  29,  29,  25,  21,  10,
-    1,   2,   5,   9,   9,   5,   2,   1,             // Pawns 7 Rank
-    0,   0,   0,   0,   0,   0,   0,   0
-};
-
-const int PawnEG[64] =
-{
-    0,   0,   0,   0,   0,   0,   0,   0,
-    -3,  -1,   2,   3,   3,   2,  -1,  -3,
-    -2,  -1,   3,   4,   4,   3,  -1,  -2,
-    -1,   0,   4,   7,   7,   4,   0,  -1,
-    1,   2,   7,  11,  11,   7,   2,   1,
-    5,  11,  13,  14,  14,  13,  11,   5,
-    0,   1,   3,   5,   5,   3,   1,   0,
-    0,   0,   0,   0,   0,   0,   0,   0
-};
-
-const int KnightMG[64] =
-{
-    -31, -23, -20, -16, -16, -20, -23, -31,
-    -23, -16, -12,  -8,  -8, -12, -16, -23,
-    -8,  -4,   0,   8,   8,   0,  -4,  -8,
-    -4,   8,  12,  16,  16,  12,   8,  -4,
-    8,  16,  20,  23,  23,  20,  16,   8,
-    23,  27,  31,  35,  35,  31,  27,  23,
-    4,   8,  12,  16,  16,  12,   8,   4,
-    4,   4,   4,   4,   4,   4,   4,   4,
-};
-
-const int KnightEG[64] =
-{
-    -39, -27, -23, -20, -20, -23, -27, -39,
-    -27, -20, -12,  -8,  -8, -12, -20, -27,
-    -8,  -4,   0,   8,   8,   0,  -4,  -8,
-    -4,   8,  12,  16,  16,  12,   8,  -4,
-    8,  16,  20,  23,  23,  20,  16,   8,
-    12,  23,  27,  31,  31,  27,  23,  12,
-    -2,   2,   4,   8,   8,   4,   2,  -2,
-    -16,  -8,  -4,  -4,  -4,  -4,  -8, -16,
-};
-
-const int BishopMG[64] =
-{
-    -31, -23, -20, -16, -16, -20, -23, -31,
-    -23, -16, -12,  -8,  -8, -12, -16, -23,
-    -8,  -4,   0,   8,   8,   0,  -4,  -8,
-    -4,   8,  12,  16,  16,  12,   8,  -4,
-    8,  16,  20,  23,  23,  20,  16,   8,
-    23,  27,  31,  35,  35,  31,  27,  23,
-    4,   8,  12,  16,  16,  12,   8,   4,
-    4,   4,   4,   4,   4,   4,   4,   4,
-};
-
-const int BishopEG[64] =
-{
-    -39, -27, -23, -20, -20, -23, -27, -39,
-    -27, -20, -12,  -8,  -8, -12, -20, -27,
-    -8,  -4,   0,   8,   8,   0,  -4,  -8,
-    -4,   8,  12,  16,  16,  12,   8,  -4,
-    8,  16,  20,  23,  23,  20,  16,   8,
-    12,  23,  27,  31,  31,  27,  23,  12,
-    -2,   2,   4,   8,   8,   4,   2,  -2,
-    -16,  -8,  -4,  -4,  -4,  -4,  -8, -16,
-};
-
-const int RookMG[64] =
-{
-    -10,  -8,  -6,  -4,  -4,  -6,  -8, -10,
-    -8,  -6,  -4,  -2,  -2,  -4,  -6,  -8,
-    -4,  -2,   0,   4,   4,   0,  -2,  -4,
-    -2,   2,   4,   8,   8,   4,   2,  -2,
-    2,   4,   8,  12,  12,   8,   4,   2,
-    4,   8,   12, 16,  16,  12,   8,   4,
-    20,  21,   23, 23,  23,  23,  21,  20,
-    18,  18,   20, 20,  20,  20,  18,  18,
-};
-
-const int RookEG[64] =
-{
-    -10,  -8,  -6,  -4,  -4,  -6,  -8, -10,
-    -8,  -6,  -4,  -2,  -2,  -4,  -6,  -8,
-    -4,  -2,   0,   4,   4,   0,  -2,  -4,
-    -2,   2,   4,   8,   8,   4,   2,  -2,
-    2,   4,   8,  12,  12,   8,   4,   2,
-    4,   8,  12,  16,  16,  12,   8,   4,
-    20,  21,  23,  23,  23,  23,  21,  20,
-    18,  18,  20,  20,  20,  20,  18,  18,
-};
-
-const int QueenMG[64] =
-{
-    -23, -20, -16, -12, -12, -16, -20, -23,
-    -18, -14, -12,  -8,  -8, -12, -14, -18,
-    -16,  -8,   0,   8,   8,   0,  -8, -16,
-    -8,   0,  12,  16,  16,  12,   0,  -8,
-    4,  12,  16,  23,  23,  16,  12,   4,
-    16,  23,  27,  31,  31,  27,  23,  16,
-    4,  12,  16,  23,  23,  16,  12,   4,
-    2,   8,  12,  12,  12,  12,   8,   2,
-};
-
-const int QueenEG[64] =
-{
-    -23, -20, -16, -12, -12, -16, -20, -23,
-    -18, -14, -12,  -8,  -8, -12, -14, -18,
-    -16,  -8,   0,   8,   8,   0,  -8, -16,
-    -8,   0,  12,  16,  16,  12,   0,  -8,
-    4,  12,  16,  23,  23,  16,  12,   4,
-    16,  23,  27,  31,  31,  27,  23,  16,
-    4,  12,  16,  23,  23,  16,  12,   4,
-    2,   8,  12,  12,  12,  12,   8,   2,
-};
-
-const int KingMG[64] =
-{
-    40,  50,  30,  10,  10,  30,  50,  40,
-    30,  40,  20,   0,   0,  20,  40,  30,
-    10,  20,   0, -20, -20,   0,  20,  10,
-    0,  10, -10, -30, -30, -10,  10,   0,
-    -10,   0, -20, -40, -40, -20,   0, -10,
-    -20, -10, -30, -50, -50, -30, -10, -20,
-    -30, -20, -40, -60, -60, -40, -20, -30,
-    -40, -30, -50, -70, -70, -50, -30, -40 ,
-};
-
-const int KingEG[64] =
-{
-    -34, -30, -28, -27, -27, -28, -30, -34,
-    -17, -13, -11, -10, -10, -11, -13, -17,
-    -2,   2,   4,   5,   5,   4,   2,  -2,
-    11,  15,  17,  18,  18,  17,  15,  11,
-    22,  26,  28,  29,  29,  28,  26,  22,
-    31,  34,  37,  38,  38,  37,  34,  31,
-    38,  41,  44,  45,  45,  44,  41,  38,
-    42,  46,  48,  50,  50,  48,  46,  42,
-};
-
-const int mirror[64] = {
-  56,  57,  58,  59,  60,  61,  62,  63,
-  48,  49,  50,  51,  52,  53,  54,  55,
-  40,  41,  42,  43,  44,  45,  46,  47,
-  32,  33,  34,  35,  36,  37,  38,  39,
-  24,  25,  26,  27,  28,  29,  30,  31,
-  16,  17,  18,  19,  20,  21,  22,  23,
-   8,   9,  10,  11,  12,  13,  14,  15,
-   0,   1,   2,   3,   4,   5,   6,   7
-};
-
-#define MG 0
-#define EG 1
 #define PhaseNb 2
 #define RANK_NB 8
 
@@ -2539,11 +2515,11 @@ int Evalpos(S_BOARD* pos) {
     U64 blackKingBitboard = (pos->PieceBB[k]);
     int bKingSq = PopBit(&blackKingBitboard);
 
-    mg += KingMG[wKingSq];
-    eg += KingEG[wKingSq];
+    mg += PSQTMidgame[K][wKingSq];
+    eg += PSQTEndgame[K][wKingSq];
 
-    mg -= KingMG[mirror[bKingSq]];
-    eg -= KingEG[mirror[bKingSq]];
+    mg -= PSQTMidgame[k][bKingSq];
+    eg -= PSQTEndgame[k][bKingSq];
 
     U64 whitePawns = white & pawns;
     U64 blackPawns = black & pawns;
@@ -2656,13 +2632,13 @@ int Evalpos(S_BOARD* pos) {
 
             if (color == WHITE)
             {
-                mg += PawnMG[bit];
-                eg += PawnEG[bit];
+                mg += PSQTMidgame[P][bit];
+                eg += PSQTEndgame[P][bit];
             }
             else
             {
-                mg += PawnMG[mirror[bit]];
-                eg += PawnEG[mirror[bit]];
+                mg += PSQTMidgame[p][bit];
+                eg += PSQTEndgame[p][bit];
             }
 
             // Save the fact that this pawn is passed. We will
@@ -2702,13 +2678,13 @@ int Evalpos(S_BOARD* pos) {
 
             if (color == WHITE)
             {
-                mg += KnightMG[bit];
-                eg += KnightEG[bit];
+                mg += PSQTMidgame[N][bit];
+                eg += PSQTEndgame[N][bit];
             }
             else
             {
-                mg += KnightMG[mirror[bit]];
-                eg += KnightEG[mirror[bit]];
+                mg += PSQTMidgame[n][bit];
+                eg += PSQTEndgame[n][bit];
             }
 
             attacks = KnightAttacks[bit];
@@ -2758,13 +2734,13 @@ int Evalpos(S_BOARD* pos) {
 
             if (color == WHITE)
             {
-                mg += BishopMG[bit];
-                eg += BishopEG[bit];
+                mg += PSQTMidgame[B][bit];
+                eg += PSQTEndgame[B][bit];
             }
             else
             {
-                mg += BishopMG[mirror[bit]];
-                eg += BishopEG[mirror[bit]];
+                mg += PSQTMidgame[b][bit];
+                eg += PSQTEndgame[b][bit];
             }
 
             attacks = BishopAttacks(pos, bit);
@@ -2821,13 +2797,13 @@ int Evalpos(S_BOARD* pos) {
 
             if (color == WHITE)
             {
-                mg += RookMG[bit];
-                eg += RookEG[bit];
+                mg += PSQTMidgame[R][bit];
+                eg += PSQTEndgame[R][bit];
             }
             else
             {
-                mg += RookMG[mirror[bit]];
-                eg += RookEG[mirror[bit]];
+                mg += PSQTMidgame[r][bit];
+                eg += PSQTEndgame[r][bit];
             }
 
             attacks = RookAttacks(pos, bit);
@@ -2876,13 +2852,13 @@ int Evalpos(S_BOARD* pos) {
 
             if (color == WHITE)
             {
-                mg += QueenMG[bit];
-                eg += QueenEG[bit];
+                mg += PSQTMidgame[Q][bit];
+                eg += PSQTEndgame[Q][bit];
             }
             else
             {
-                mg += QueenMG[mirror[bit]];
-                eg += QueenEG[mirror[bit]];
+                mg += PSQTMidgame[q][bit];
+                eg += PSQTEndgame[q][bit];
             }
 
             attacks = (RookAttacks(pos, bit) | BishopAttacks(pos, bit));
