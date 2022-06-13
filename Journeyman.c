@@ -17,7 +17,7 @@ typedef unsigned long long U64;
 typedef char string[200];
 
 #define NAME "Journeyman"
-#define VERSION "1.9"
+#define VERSION "2.0"
 #define AUTHOR "Jay Warendorff"
 
 #define NUM_SQUARES 64
@@ -53,6 +53,13 @@ enum {
     A7, B7, C7, D7, E7, F7, G7, H7,
     A8, B8, C8, D8, E8, F8, G8, H8,
 };
+
+typedef enum Direction {
+    north = 8,
+    east = 1,
+    south = -north,
+    west = -east
+} Direction;
 
 typedef uint64_t Key;
 typedef uint32_t Move;
@@ -1593,6 +1600,83 @@ U64 pawnAdvance(U64 pawns, U64 occupied, int color) {
     return ~occupied & (color == WHITE ? (pawns << 8) : (pawns >> 8));
 }
 
+// Shifts a bitboard (protonspring version)
+// Doesn't work for shifting more than one step horizontally
+U64 ShiftBB(const Direction dir, U64 bb) {
+
+    // Horizontal shifts should not wrap around
+    const int h = dir & 7;
+    bb = (h == 1) ? bb & ~FILEH
+        : (h == 7) ? bb & ~FILEA
+        : bb;
+
+    // Can only shift by positive numbers
+    return dir > 0 ? bb << dir
+        : bb >> -dir;
+}
+
+// Returns the combined attack bitboard of all pawns in the given bitboard
+U64 PawnBBAttackBB(U64 pawns, int color) {
+
+    const Direction up = (color == WHITE ? north : south);
+
+    return ShiftBB(up + west, pawns) | ShiftBB(up + east, pawns);
+}
+
+// Pawn phalanx
+const int PawnPhalanx[8][2] = {
+    {0,  0}, {6,  6}, {18,  9}, {24, 25}, {62, 95}, {106,204}, {164,255}, {0,  0},
+};
+
+int PawnThreat[2] = { 60, 44 };
+int PushThreat[2] = { 18, -2 };
+
+// Evaluates threats
+int EvalThreats(Board* position, int color, int phase) {
+
+    const Direction up = color == WHITE ? north : south;
+
+    int count, eval = 0;
+    U64 ourPawns, theirNonPawns, pawnPushes;
+
+    if (color == WHITE)
+    {
+        ourPawns = position -> pieceBB[WHITE_PAWN];
+        theirNonPawns = position->pieceBB[!color] ^ position->pieceBB[BLACK_PAWN];
+    }
+    else
+    {
+        ourPawns = position -> pieceBB[BLACK_PAWN];
+        theirNonPawns = position->pieceBB[!color] ^ position->pieceBB[WHITE_PAWN];
+    }
+
+    count = bitCount(PawnBBAttackBB(ourPawns, color) & theirNonPawns);
+
+    if (phase == 0)
+    {
+        eval += PawnThreat[0] * count;
+    }
+    else
+    {
+        eval += PawnThreat[1] * count;
+    }
+
+    pawnPushes = ShiftBB(up, ourPawns) & ~(position->occupiedBB);
+
+    count = bitCount(PawnBBAttackBB(pawnPushes, color) & theirNonPawns);
+
+    if (phase == 0)
+    {
+        eval += PushThreat[0] * count;
+    }
+    else
+    {
+        eval += PushThreat[1] * count;
+    }
+
+    return eval;
+}
+
 int evaluatePieces(Board* position) {
 
     uint64_t white = position->pieceBB[WHITE];
@@ -1783,6 +1867,14 @@ int evaluatePieces(Board* position) {
                 eg += PawnConnected[colour][bit];
             }
 
+        }
+
+        // Phalanx
+        U64 phalanx = myPawns & ShiftBB(west, myPawns);
+        while (phalanx) {
+            int rank = RelativeRank(colour, rankOf(PopBit(&phalanx)));
+            mg += PawnPhalanx[rank][MG];
+            eg += PawnPhalanx[rank][EG];
         }
 
         while (tempKnights) {
@@ -2001,6 +2093,7 @@ int evaluatePieces(Board* position) {
                 attackerCounts[colour]++;
             }
         }
+
     }
 
     // Evaluate the passed pawns for both colours
@@ -2110,8 +2203,8 @@ int evaluatePieces(Board* position) {
     evalpiecesEG += (bitCount(position->pieceBB[WHITE_BISHOP]) - bitCount(position->pieceBB[BLACK_BISHOP])) * pieceValues[2][1];
     evalpiecesEG += (bitCount(position->pieceBB[WHITE_QUEEN]) - bitCount(position->pieceBB[BLACK_QUEEN])) * pieceValues[4][1];
     
-    mg = mg + evalpiecesMG;
-    eg = eg + evalpiecesEG;
+    mg = mg + evalpiecesMG + EvalThreats(position, WHITE, MG) - EvalThreats(position, BLACK, MG);
+    eg = eg + evalpiecesEG + EvalThreats(position, WHITE, EG) - EvalThreats(position, BLACK, EG);
 
     curPhase = 24 - (bitCount(knights | bishops))
         - (bitCount(rooks) << 1)
