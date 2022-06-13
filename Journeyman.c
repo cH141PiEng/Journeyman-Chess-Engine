@@ -16,7 +16,9 @@
 typedef unsigned long long U64;
 typedef char string[200];
 
-#define NAME "Journeyman 1.8"
+#define NAME "Journeyman"
+#define VERSION "1.9"
+#define AUTHOR "Jay Warendorff"
 
 #define NUM_SQUARES 64
 #define MAX_GAME_MOVES 2048
@@ -3695,7 +3697,7 @@ bool MoveIsQuiet(int move) {
 int tempo = 15;
 
 static int AlphaBeta(int alpha, int beta, Depth depth, Board* position, SearchInfo* info, PV* pv) {
-    
+
     bool pvNode = alpha != beta - 1;
     const bool root = position->ply == 0;
 
@@ -3751,7 +3753,7 @@ static int AlphaBeta(int alpha, int beta, Depth depth, Board* position, SearchIn
 
         // Mate Distance Pruning (finds shorter mates)
         alpha = MAX(alpha, -infinite + position->ply);
-        beta = MIN(beta, infinite - position->ply-1);
+        beta = MIN(beta, infinite - position->ply - 1);
         if (alpha >= beta) {
             return alpha;
         }
@@ -3771,7 +3773,7 @@ static int AlphaBeta(int alpha, int beta, Depth depth, Board* position, SearchIn
 
         // Check if ttScore causes a cutoff
         if (ttScore >= beta ? tte->bound & BOUND_LOWER
-                            : tte->bound & BOUND_UPPER)
+            : tte->bound & BOUND_UPPER)
 
             return ttScore;
     }
@@ -3780,61 +3782,61 @@ static int AlphaBeta(int alpha, int beta, Depth depth, Board* position, SearchIn
     int score;
 
     // Do a static evaluation for pruning considerations
-    int eval = history(0).eval = inCheck          ? 32501
-                               : lastMoveNullMove ? -history(-1).eval + 2 * tempo
-                                                  : evaluatePosition(position);
+    int eval = history(0).eval = inCheck ? 32501
+        : lastMoveNullMove ? -history(-1).eval + 2 * tempo
+        : evaluatePosition(position);
 
     // Use ttScore as eval if useful
     if (ttScore != 32501
         && (tte->bound & (ttScore > eval ? BOUND_LOWER : BOUND_UPPER)))
         eval = ttScore;
-    
+
     // Improving if not in check, and current eval is higher than 2 plies ago
     bool improving = !inCheck && position->ply >= 2 && eval > history(-2).eval;
-    
+
     // Skip pruning while in check and at the root
     if (inCheck || root)
         goto move_loop;
 
-     // Razoring
-     if (!pvNode && depth < 2 && eval + 640 < alpha)
-     return Quiescence(alpha, beta, position, info);
+    // Razoring
+    if (!pvNode && depth < 2 && eval + 350 < alpha)
+        return Quiescence(alpha, beta, position, info);
 
-     // Reverse Futility Pruning
-     if (!pvNode && depth < 7 && eval - 225 * depth + 100 * improving >= beta)
-         return eval;
+    // Reverse Futility Pruning
+    if (!pvNode && depth < 7 && eval - 175 * depth + 100 * improving >= beta)
+        return eval;
 
-     // Null Move Pruning
-     if (!pvNode && history(-1).move != NOMOVE && eval >= beta && history(0).eval >= beta && BigPiecesExist(position, position->side) && depth >= 3 && (!ttHit || !(tte->bound & BOUND_UPPER) || ttScore >= beta)) {
+    // Null Move Pruning
+    if (!pvNode && history(-1).move != NOMOVE && eval >= beta && history(0).eval >= beta && BigPiecesExist(position, position->side) && depth >= 3 && (!ttHit || !(tte->bound & BOUND_UPPER) || ttScore >= beta)) {
 
-          int R = 3 + depth / 5 + MIN(3, (eval - beta) / 256);
-            
-          MakeNullMove(position);
-          score = -AlphaBeta(-beta, -beta + 1, depth - R, position, info, &pv_from_here);
-          TakeNullMove(position);
+        int R = 3 + depth / 5 + MIN(3, (eval - beta) / 256);
 
-          // Cutoff
-          if (score >= beta) {
-              // Don't return unproven mate scores
-              if (score >= ISMATE)
-                  score = beta;
-              return score;
-          }
-     }
+        MakeNullMove(position);
+        score = -AlphaBeta(-beta, -beta + 1, depth - R, position, info, &pv_from_here);
+        TakeNullMove(position);
 
-     // Internal iterative deepening
-     if (depth >= 4 && !ttMove) {
+        // Cutoff
+        if (score >= beta) {
+            // Don't return unproven mate scores
+            if (score >= ISMATE)
+                score = beta;
+            return score;
+        }
+    }
+
+    // Internal iterative deepening
+    if (depth >= 4 && !ttMove) {
 
         AlphaBeta(alpha, beta, MAX(1, MIN(depth / 2, depth - 4)), position, info, &pv_from_here);
 
         tte = ProbeTT(posKey, &ttHit);
 
         ttMove = ttHit ? tte->move : NOMOVE;
-     }
+    }
 
-     // Internal iterative reduction based on Rebel's idea
-     if (depth >= 4 && !ttMove)
-         depth--;
+    // Internal iterative reduction based on Rebel's idea
+    if (depth >= 4 && !ttMove)
+        depth--;
 
 move_loop:
 
@@ -3867,7 +3869,7 @@ move_loop:
             quietCount++;
 
         const Depth newDepth = depth - 1;
-        
+
         bool doLMR = depth > 2 && movesTried > (2 + pvNode);
 
         // Reduced depth zero-window search (-1 depth)
@@ -3891,7 +3893,7 @@ move_loop:
             score = -AlphaBeta(-alpha - 1, -alpha, newDepth, position, info, &pv_from_here);
 
         // Full depth alpha-beta window search
-        if (pvNode && ((score > alpha && score < beta) || movesTried == 1))
+        if (pvNode && ((score > alpha&& score < beta) || movesTried == 1))
         {
             score = -AlphaBeta(-beta, -alpha, newDepth, position, info, &pv_from_here);
         }
@@ -3906,7 +3908,7 @@ move_loop:
             bestMove = move;
 
             // Update the Principle Variation
-            if ((score > alpha && pvNode) || (root && movesTried == 1)) {
+            if ((score > alpha&& pvNode) || (root && movesTried == 1)) {
 
                 pv->length = 1 + pv_from_here.length;
                 pv->input[0] = move;
@@ -3944,8 +3946,8 @@ move_loop:
     }
 
     int flag = bestScore >= beta ? BOUND_LOWER
-             : alpha != oldAlpha ? BOUND_EXACT
-                                 : BOUND_UPPER;
+        : alpha != oldAlpha ? BOUND_EXACT
+        : BOUND_UPPER;
 
     StoreTTEntry(tte, posKey, bestMove, ScoreToTT(bestScore, position->ply), depth, flag);
 
@@ -4127,8 +4129,8 @@ void uci(Board* position, SearchInfo* info) {
     setbuf(stdout, NULL);
 
     char input[INPUTBUFFER];
-    printf("id name Novice2.0\n");
-    printf("id author Jay Warendorff\n");
+    printf("id name " NAME " " VERSION "\n");
+    printf("id author " AUTHOR "\n");
     printf("uciok\n");
 
     while (1) {
@@ -4158,8 +4160,8 @@ void uci(Board* position, SearchInfo* info) {
             info->quit = 1;
         }
         else if (!strncmp(input, "uci", 3)) {
-            printf("id name Novice2.0\n");
-            printf("id author Jay Warendorff\n");
+            printf("id name " NAME " " VERSION "\n");
+            printf("id author " AUTHOR "\n");
             printf("uciok\n");
         }
         if (info->quit) {
