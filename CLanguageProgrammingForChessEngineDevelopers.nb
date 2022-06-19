@@ -1,0 +1,124 @@
+(* Content-type: application/vnd.wolfram.mathematica *)
+
+(*** Wolfram Notebook File ***)
+(* http://www.wolfram.com/nb *)
+
+(* CreatedBy='Mathematica 13.1' *)
+
+(*CacheID: 234*)
+(* Internal cache information:
+NotebookFileLineBreakTest
+NotebookFileLineBreakTest
+NotebookDataPosition[       158,          7]
+NotebookDataLength[      4035,        116]
+NotebookOptionsPosition[      2782,         85]
+NotebookOutlinePosition[      3217,        102]
+CellTagsIndexPosition[      3174,         99]
+WindowFrame->Normal*)
+
+(* Beginning of Notebook Content *)
+Notebook[{
+
+Cell[CellGroupData[{
+Cell["C Language Programming For Chess Engine Developers", "Title",
+ CellChangeTimes->{{3.863649522607182*^9, 3.863649535653648*^9}, {
+  3.863882852428729*^9, 3.863882875891577*^9}, {3.8638839816071672`*^9, 
+  3.863883982544113*^9}},ExpressionUUID->"cbc17001-beef-4d4a-a097-\
+7b850c1076aa"],
+
+Cell["Jay Warendorff", "Text",
+ CellChangeTimes->{{3.863649609703246*^9, 
+  3.8636496151455517`*^9}},ExpressionUUID->"d3945f0d-8da3-45a7-b280-\
+0f652a0225c5"],
+
+Cell[CellGroupData[{
+
+Cell[BoxData[
+ RowBox[{"DateString", "[", "]"}]], "Input",
+ CellChangeTimes->{{3.863649618347518*^9, 3.863649623714889*^9}},
+ CellLabel->"In[1]:=",ExpressionUUID->"a077580f-d043-4587-9049-59c939bf54ce"],
+
+Cell[BoxData["\<\"Tue 7 Jun 2022 23:00:24\"\>"], "Output",
+ CellChangeTimes->{3.863649625177957*^9},
+ CellLabel->"Out[1]=",ExpressionUUID->"913d4445-6b43-4b4b-8ac8-095b848e758f"]
+}, {2}]],
+
+Cell[CellGroupData[{
+
+Cell["Overview", "Section",
+ CellChangeTimes->{{3.8638840465949507`*^9, 
+  3.863884054403528*^9}},ExpressionUUID->"db08bf9b-ed1e-4358-a644-\
+805cd3c55e93"],
+
+Cell["\<\
+The C programming language is an ideal language to write a chess engine in. \
+Programs written and compiled in C are fast and the language is not overly \
+difficult to learn. This book will concentrate on those aspects of C needed \
+to completely understand the code of version 1.0 of the Journeyman chess \
+engine which is available at \
+https://github.com/cH141PiEng/Journeyman-Chess-Engine/releases/tag/v1.0.\
+\>", "Text",
+ CellChangeTimes->{{3.86388405778057*^9, 3.863884294896882*^9}, {
+  3.863884344918253*^9, 
+  3.8638843512205887`*^9}},ExpressionUUID->"41420dc5-6227-48f7-b113-\
+866182250a1d"]
+}, Open  ]],
+
+Cell[CellGroupData[{
+
+Cell["Free IDE", "Section",
+ CellChangeTimes->{{3.863649641072927*^9, 
+  3.863649655902124*^9}},ExpressionUUID->"b2edbf64-9307-4845-8c11-\
+80ceb6b3c0b5"],
+
+Cell["Visual Studio Community", "Text",
+ CellChangeTimes->{
+  3.863649733100383*^9},ExpressionUUID->"a85e248d-024e-46a1-b68b-\
+079f474b07fd"],
+
+Cell["https://visualstudio.microsoft.com/free-developer-offers/", "Text",
+ CellChangeTimes->{
+  3.863649704592317*^9},ExpressionUUID->"7f648bb2-3d9b-4e81-ab8b-\
+5c96d6981cde"]
+}, Open  ]]
+}, Open  ]]
+},
+WindowSize->{808, 699},
+WindowMargins->{{Automatic, 313}, {Automatic, 34}},
+TaggingRules-><|"TryRealOnly" -> False|>,
+FrontEndVersion->"13.1 for Mac OS X x86 (64-bit) (June 8, 2022)",
+StyleDefinitions->"Default.nb",
+ExpressionUUID->"6dc7d31a-a50d-4cac-b333-f103e30059f3"
+]
+(* End of Notebook Content *)
+
+(* Internal cache information *)
+(*CellTagsOutline
+CellTagsIndex->{}
+*)
+(*CellTagsIndex
+CellTagsIndex->{}
+*)
+(*NotebookFileOutline
+Notebook[{
+Cell[CellGroupData[{
+Cell[580, 22, 290, 4, 160, "Title",ExpressionUUID->"cbc17001-beef-4d4a-a097-7b850c1076aa"],
+Cell[873, 28, 158, 3, 35, "Text",ExpressionUUID->"d3945f0d-8da3-45a7-b280-0f652a0225c5"],
+Cell[CellGroupData[{
+Cell[1056, 35, 202, 3, 30, "Input",ExpressionUUID->"a077580f-d043-4587-9049-59c939bf54ce"],
+Cell[1261, 40, 178, 2, 34, "Output",ExpressionUUID->"913d4445-6b43-4b4b-8ac8-095b848e758f"]
+}, {2}]],
+Cell[CellGroupData[{
+Cell[1473, 47, 155, 3, 67, "Section",ExpressionUUID->"db08bf9b-ed1e-4358-a644-805cd3c55e93"],
+Cell[1631, 52, 611, 11, 104, "Text",ExpressionUUID->"41420dc5-6227-48f7-b113-866182250a1d"]
+}, Open  ]],
+Cell[CellGroupData[{
+Cell[2279, 68, 153, 3, 67, "Section",ExpressionUUID->"b2edbf64-9307-4845-8c11-80ceb6b3c0b5"],
+Cell[2435, 73, 141, 3, 35, "Text",ExpressionUUID->"a85e248d-024e-46a1-b68b-079f474b07fd"],
+Cell[2579, 78, 175, 3, 35, "Text",ExpressionUUID->"7f648bb2-3d9b-4e81-ab8b-5c96d6981cde"]
+}, Open  ]]
+}, Open  ]]
+}
+]
+*)
+
